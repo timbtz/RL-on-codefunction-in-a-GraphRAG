@@ -1,0 +1,8 @@
+# Strategy family "vector_only" -- the deliberately-naive Stage-1 arm.
+family: vector_only
+seed: src/graphretr_opt/artifact/seeds/vector_only.py
+notes: >
+  Pure ANN over node-text embeddings, no graph structure. Chosen as the seed
+  precisely because it leaves headroom that only graph-aware composition can
+  close (stage0 measured: seed 0.1688 vs one-shot rewrite 0.1837 recall@20 on
+  the frozen gate; reported dense-retriever ceiling ~0.381).

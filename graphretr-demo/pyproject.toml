@@ -1,0 +1,11 @@
+[project]
+name = "graphretr-opt"
+version = "0.1.0"
+description = "Optimizer service that rewrites a search(q, G) program over a frozen graph environment (Stage-1 demo)."
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

@@ -1,0 +1,38 @@
+# Campaign knobs. Defaults live in graphretr_opt/config.py (Config dataclass);
+# this file overlays them; env vars (FALKOR_PORT, MUTATOR_MODEL, ...) win last.
+
+# infrastructure
+falkor_host: 127.0.0.1
+falkor_port: 6380
+graph_name: prime
+mlflow_url: http://127.0.0.1:5000
+experiment: graphretr-opt
+
+# data / gate
+gate_size: 200          # frozen val subsample scored every step
+gate_seed: 42           # seeds gate sampling AND per-step rollout rng
+gate_metric: recall@20  # what the accept gate compares (strict >)
+
+# fast loop (SkillOpt-derived)
+steps: 30
+rollout_batch: 24       # train queries per rollout
+reflect_top: 8          # worst misses shown to the LLM
+buffer_last: 8          # rejected-edit entries fed back into the prompt
+edit_schedule: const    # const | cosine | linear  (the "learning rate")
+max_edits: 4            # L_max: diff-hunk budget per mutation
+min_edits: 1            # L_min: floor for decaying schedules
+
+# hard caps / safety walls
+query_timeout_ms: 2000
+max_fanout: 200
+max_k: 3
+probe_timeout_s: 10.0
+crash_frac_limit: 0.10
+
+# mutator
+mutator_backend: cli    # cli (claude -p) | sdk (anthropic client; needs API key)
+mutator_model: opus
+llm_timeout_s: 900
+
+# strategy arm (layer 3): which seed family this campaign descends
+strategy: vector_only
