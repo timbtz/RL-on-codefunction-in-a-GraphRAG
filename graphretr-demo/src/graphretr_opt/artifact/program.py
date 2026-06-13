@@ -39,6 +39,17 @@ class SearchProgram:
                                      other.src.splitlines())
         return sum(1 for op, *_ in sm.get_opcodes() if op != "equal")
 
+    def change_summary(self, other: "SearchProgram", max_changes: int = 2) -> str:
+        """One-line gist of the edit vs another program -- the first few changed
+        lines, for the rejected buffer (the full diff is too big to keep)."""
+        changed = [l for l in difflib.unified_diff(
+            self.src.splitlines(), other.src.splitlines(), lineterm="")
+            if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+        head = "  ".join(l.strip() for l in changed[:max_changes * 2])
+        extra = len(changed) - max_changes * 2
+        return (head + (f" (+{extra} more lines)" if extra > 0 else "")
+                or "(no textual change)")
+
     def diff(self, other: "SearchProgram", max_lines: int = 80) -> str:
         lines = list(difflib.unified_diff(
             self.src.splitlines(), other.src.splitlines(),

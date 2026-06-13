@@ -55,6 +55,13 @@ class Substrate:
         print(f"[substrate] gate: sampled {len(idxs)} val idxs (seed {seed}) -> {path}")
         return idxs
 
+    def rotating_gate_idxs(self, size, seed, epoch):
+        """A resampled val subsample for a ROTATING accept gate -- deterministic
+        per (seed, epoch) but different each epoch, so the optimizer cannot
+        memorise one frozen 200-query subset. Not persisted; reproducible."""
+        rng = random.Random(seed * 100003 + epoch)
+        return sorted(rng.sample(self._val, size))
+
     def get_test_idxs_I_KNOW_THIS_IS_FINAL(self):
         """The locked test split. Called ONLY by the final-test entrypoint."""
         return list(self._test)

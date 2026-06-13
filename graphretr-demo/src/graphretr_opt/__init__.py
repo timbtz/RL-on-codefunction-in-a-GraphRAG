@@ -12,6 +12,6 @@ The artifact that flows between them is artifact/program.py:SearchProgram
 strategy family (layer 3, slow loop).
 
 Stage 1 (this demo) drives optimizer/fast_loop.py via campaign.py/cli.py and
-leaves slow_loop, scheduler, momentum, agents/team and gepa_adapter as
-documented seams.
+leaves slow_loop, scheduler and gepa_adapter as documented seams for the
+deferred cross-strategy exploration layer.
 """

@@ -9,18 +9,24 @@ mlflow_url: http://127.0.0.1:5000
 experiment: graphretr-opt
 
 # data / gate
-gate_size: 200          # frozen val subsample scored every step
-gate_seed: 42           # seeds gate sampling AND per-step rollout rng
-gate_metric: recall@20  # what the accept gate compares (strict >)
+gate_size: 200              # val subsample scored each step
+gate_seed: 42               # seeds gate sampling AND per-step rollout rng
+gate_metric: recall@20      # axis used by 'strict' mode
+gate_mode: blend            # strict | blend | dominance  (blend = anti-overfit)
+gate_blend: "recall@20:0.4,mrr:0.3,hit@1:0.3"  # Hit@1 push: weight onto ranking axes
+gate_rotate_every: 5        # resample the gate every 5 steps so it can't be memorised
+gate_max_complexity: 0      # cap OFF (user decision): still MEASURED + a Pareto axis, just not a veto.
+                            # The cosine edit budget below is the soft substitute (curbs per-step sprawl).
 
 # fast loop (SkillOpt-derived)
-steps: 30
+steps: 40                # backstop ceiling; stop_after_stale ends the run earlier on a real plateau
 rollout_batch: 24       # train queries per rollout
-reflect_top: 8          # worst misses shown to the LLM
-buffer_last: 8          # rejected-edit entries fed back into the prompt
-edit_schedule: const    # const | cosine | linear  (the "learning rate")
-max_edits: 4            # L_max: diff-hunk budget per mutation
-min_edits: 1            # L_min: floor for decaying schedules
+reflect_top: 8          # worst rows shown to the LLM (split ~50/50 missed vs misranked)
+buffer_last: 8          # rejected-edit summaries fed back into the prompt
+edit_schedule: cosine   # const | cosine | linear  (the "learning rate"): big edits early, fine late
+max_edits: 6            # L_max: edit-block budget per mutation
+min_edits: 2            # L_min: floor for decaying schedules
+stop_after_stale: 8     # stop after 8 consecutive non-accepts (plateau-termination)
 
 # hard caps / safety walls
 query_timeout_ms: 2000
@@ -30,9 +36,20 @@ probe_timeout_s: 10.0
 crash_frac_limit: 0.10
 
 # mutator
+mutator_agent: single   # single | tiered (Haiku analyst -> Sonnet editor -> Opus architect)
 mutator_backend: cli    # cli (claude -p) | sdk (anthropic client; needs API key)
-mutator_model: opus
+mutator_model: opus     # SingleCoder model (tiered arm uses the three below instead)
+analyst_model: haiku    # tiered: cheap evidence digest
+editor_model: sonnet    # tiered: routine edits
+architect_model: opus   # tiered: plateau escalation
+architect_plateau: 3    # consecutive non-accepts before escalating editor -> architect
 llm_timeout_s: 900
 
+# openai (embedder + G.extract); key in .env, ledger at runs/openai_usage.json
+embedder: openai_small
+extract_model: gpt-4o-mini  # model behind the fixed-prompt G.extract
+openai_budget_usd: 5.0      # hard $ ceiling shared by embedder + extract
+
 # strategy arm (layer 3): which seed family this campaign descends
-strategy: vector_only
+# (override per run: python -m graphretr_opt.cli optimize --strategy extract_first)
+strategy: extract_first

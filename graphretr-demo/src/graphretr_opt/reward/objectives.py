@@ -7,7 +7,7 @@ work with in Stage 2. Scalarizing here is what produces the "retrieve
 everything" degenerate, so we don't.
 
 Axes:
-  quality   -- {recall@20, hit@1, mrr} node-containment (STaRK Evaluator)
+  quality   -- {recall@20, hit@1, hit@5, mrr} node-containment (STaRK Evaluator)
   latency_s -- mean wall-clock per query (lower better)
   db_load   -- mean backend queries per query (lower better)
   code_complexity -- proxy for program size/branching (lower better)
@@ -16,7 +16,9 @@ Axes:
 import ast
 from dataclasses import dataclass, field, asdict
 
-QUALITY_KEYS = ("recall@20", "hit@1", "mrr")
+# hit@5 added for the Hit@1 push: the leaderboard reports it and it shows rank
+# movement the binary hit@1 misses. recall@20 stays the Pareto/'primary' axis.
+QUALITY_KEYS = ("recall@20", "hit@1", "hit@5", "mrr")
 
 
 @dataclass
@@ -24,6 +26,7 @@ class MetricVector:
     quality: dict = field(default_factory=lambda: {k: 0.0 for k in QUALITY_KEYS})
     latency_s: float = 0.0
     db_load: float = 0.0
+    llm_calls: float = 0.0
     code_complexity: float = 0.0
     crashed_frac: float = 0.0
     crashed: bool = False
@@ -40,6 +43,7 @@ class MetricVector:
         """Flat dict for MLflow logging (no '@' -- not a legal metric char)."""
         out = {f"quality_{k.replace('@', '_at_')}": v for k, v in self.quality.items()}
         out.update(latency_s=self.latency_s, db_load=self.db_load,
+                   llm_calls=self.llm_calls,
                    code_complexity=self.code_complexity,
                    crashed_frac=self.crashed_frac, crashed=float(self.crashed))
         return out

@@ -29,6 +29,7 @@ class RewardModel:
         crashed = 0
         lat_sum = 0.0
         q_sum = 0
+        llm_sum = 0
         for idx in idxs:
             query, q_id, answer_ids = self._sub.example(idx)
             row = {"idx": int(idx), "q_id": q_id, "query": query,
@@ -38,20 +39,28 @@ class RewardModel:
                 m = self._ev.evaluate(
                     pred, torch.LongTensor(answer_ids), metrics=list(QUALITY_KEYS))
                 row["metrics"] = {k: float(m[k]) for k in QUALITY_KEYS}
-                row["retrieved"] = [
-                    i for i, _ in sorted(pred.items(), key=lambda t: -t[1])[:20]]
+                # Keep scores + gold ranks so the reflection prompt can show WHAT
+                # out-ranked the gold (ranking-failure diagnosis, not just recall).
+                ranked = sorted(pred.items(), key=lambda t: -t[1])
+                row["retrieved"] = [(int(i), float(s)) for i, s in ranked[:20]]
+                pos = {int(i): r for r, (i, _) in enumerate(ranked)}
+                row["gold_ranks"] = {a: (pos[a], float(pred[a]))
+                                     for a in answer_ids if a in pos}
                 lat_sum += stats.latency_s
                 q_sum += stats.queries
+                llm_sum += stats.llm_calls
             except SandboxError as e:
                 crashed += 1
                 row["error"] = str(e)
                 row["metrics"] = self._zero_quality()
                 row["retrieved"] = []
+                row["gold_ranks"] = {}
             except Exception as e:
                 crashed += 1
                 row["error"] = f"{type(e).__name__}: {e}"
                 row["metrics"] = self._zero_quality()
                 row["retrieved"] = []
+                row["gold_ranks"] = {}
             rows.append(row)
 
         n = max(1, len(rows))
@@ -60,6 +69,7 @@ class RewardModel:
             quality=quality,
             latency_s=lat_sum / n,
             db_load=q_sum / n,
+            llm_calls=llm_sum / n,
             code_complexity=code_complexity(src) if src else 0.0,
             crashed_frac=crashed / n,
         )

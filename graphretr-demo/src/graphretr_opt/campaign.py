@@ -4,17 +4,19 @@
 boot() assembles the immutable env (backend -> RetrievalGraph -> Sandbox) and
 the data/reward stack once; each entrypoint composes the optimizer pieces it
 needs on top. Stage-1 drives FastLoop directly and ignores SlowLoop/scheduler/
-momentum/gepa_adapter (all present as seams).
+gepa_adapter (all present as seams).
 """
 import os
 import random
 import time
+from dataclasses import replace
 
 from .config import load_config, load_strategy
 from .data.substrate import Substrate
 from .env.backends.falkordb import FalkorDBBackend
 from .env.cache import PrimitiveCache
-from .env.embedder import QueryEmbedder
+from .env.embedder import make_embedder
+from .env.openai_client import OpenAIBudget
 from .env.retrieval_graph import RetrievalGraph
 from .env.sandbox import Sandbox, SandboxError, SAFE_BUILTINS
 from .reward.evaluator import RewardModel
@@ -22,6 +24,7 @@ from .reward.objectives import QUALITY_KEYS
 from .reward.pareto import ParetoArchive
 from .artifact.program import SearchProgram
 from .agents.single import SingleCoder
+from .agents.team import TieredCoder
 from .optimizer.edit_budget import EditBudget
 from .optimizer.mutator import Mutator
 from .optimizer.fast_loop import FastLoop
@@ -37,7 +40,16 @@ class Campaign:
     def boot(self):
         cfg = self.cfg
         backend = FalkorDBBackend(cfg.falkor_host, cfg.falkor_port, cfg.graph_name)
-        self.graph = RetrievalGraph(cfg, backend, PrimitiveCache(), QueryEmbedder())
+        # One shared metered OpenAI gateway for the embedder AND G.extract;
+        # without a key both stay disabled and the minilm path works as before.
+        budget = None
+        if os.environ.get("OPENAI_API_KEY"):
+            budget = OpenAIBudget(os.path.join(cfg.runs_dir, "openai_usage.json"),
+                                  ceiling_usd=cfg.openai_budget_usd)
+            print(f"[campaign] openai budget: ${budget.spent_usd:.2f} spent of "
+                  f"${cfg.openai_budget_usd:.2f} ceiling (embedder={cfg.embedder})")
+        self.graph = RetrievalGraph(cfg, backend, PrimitiveCache(),
+                                    make_embedder(cfg, budget), llm_budget=budget)
         self.sandbox = Sandbox(self.graph, default_timeout_s=cfg.probe_timeout_s)
         self.substrate = Substrate()
         self.reward = RewardModel(self.substrate, self.sandbox, cfg.crash_frac_limit)
@@ -45,8 +57,14 @@ class Campaign:
         return self
 
     def _make_mutator(self):
-        agent = SingleCoder(self.cfg.mutator_backend, self.cfg.mutator_model,
-                            self.cfg.llm_timeout_s)
+        cfg = self.cfg
+        if cfg.mutator_agent == "tiered":
+            agent = TieredCoder(cfg.mutator_backend, cfg.analyst_model,
+                                cfg.editor_model, cfg.architect_model,
+                                cfg.llm_timeout_s)
+        else:
+            agent = SingleCoder(cfg.mutator_backend, cfg.mutator_model,
+                                cfg.llm_timeout_s)
         return Mutator(agent, self.graph.describe(), SAFE_BUILTINS)
 
     def _seed_program(self):
@@ -106,11 +124,11 @@ class Campaign:
                                         per_query_timeout_s=cfg.probe_timeout_s)
             loop = FastLoop(cfg, self.graph, self.sandbox, self.reward, mutator,
                             EditBudget("const", cfg.max_edits), tracker, self.archive)
-            fails = loop._worst_failures(rows, cfg.reflect_top)
+            fails, wins = loop._reflect(rows, cfg.reflect_top)
 
             print(f"[stage0] one-shot rewrite ({cfg.mutator_backend}/{cfg.mutator_model}) ...")
             t0 = time.time()
-            cand, transcript = mutator.propose(seed, fails, [], cfg.max_edits)
+            cand, transcript = mutator.propose(seed, fails, wins, [], cfg.max_edits)
             tracker.log_metrics({"llm_seconds": time.time() - t0})
             open(os.path.join(run_dir, "reflection_oneshot.md"), "w").write(transcript)
 
@@ -170,6 +188,48 @@ class Campaign:
             print(f"{k:10s} seed {report['seed'].get(k):.4f} -> best "
                   f"{report['best'].get(k):.4f}  ({'+' if d >= 0 else ''}{d:.4f})")
         return report
+
+    def ablate(self, strategies=("vector_only", "hybrid_rrf", "extract_first"),
+               test_n=0, campaign="ablate"):
+        """Seed-only attribution: score each strategy SEED on the SAME gate
+        subsample (and an optional fixed test subsample) -- no optimizer, no
+        Opus, embedder calls only. Answers 'is the embedder or the LLM extractor
+        doing the work?' for cents. Reports B-A (sparse fusion) and C-B (LLM
+        query-understanding) when the three canonical arms are present."""
+        cfg = self.cfg
+        run_dir = os.path.join(cfg.runs_dir, campaign)
+        os.makedirs(run_dir, exist_ok=True)
+        gate = self.substrate.gate_idxs(run_dir, cfg.gate_size, cfg.gate_seed)
+        test = None
+        if test_n:
+            test = sorted(random.Random(cfg.gate_seed).sample(
+                self.substrate.get_test_idxs_I_KNOW_THIS_IS_FINAL(), test_n))
+        probes = self._probe_queries()
+
+        scores = {}
+        for name in strategies:
+            strat = load_strategy(replace(cfg, strategy=name))
+            seed = SearchProgram.from_file(strat["seed"], family=strat["family"])
+            fn = self.sandbox.compile(seed.src)
+            self.sandbox.probe(fn, probes, cfg.probe_timeout_s)
+            g = self.reward.score(fn, gate, src=seed.src,
+                                  per_query_timeout_s=cfg.probe_timeout_s)
+            t = (self.reward.score(fn, test, src=seed.src, per_query_timeout_s=30)
+                 if test else None)
+            scores[name] = (g, t)
+            print(f"[ablate] {name:14s} gate { {k: round(g.get(k), 4) for k in QUALITY_KEYS} }"
+                  + (f"  test { {k: round(t.get(k), 4) for k in QUALITY_KEYS} }" if t else ""))
+
+        print("\n==== ABLATION (recall@20 / hit@1 / mrr on the gate) ====")
+        for name, (g, _) in scores.items():
+            print(f"{name:14s} {g.get('recall@20'):.4f} / {g.get('hit@1'):.4f} / {g.get('mrr'):.4f}")
+        a, b, c = (scores.get(k, (None, None))[0]
+                   for k in ("vector_only", "hybrid_rrf", "extract_first"))
+        if a and b:
+            print(f"B-A (sparse RRF fusion): recall@20 {b.get('recall@20') - a.get('recall@20'):+.4f}")
+        if b and c:
+            print(f"C-B (LLM query-understanding): recall@20 {c.get('recall@20') - b.get('recall@20'):+.4f}")
+        return scores
 
 
 def _git_sha():

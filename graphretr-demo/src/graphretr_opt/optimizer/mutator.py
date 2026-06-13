@@ -1,64 +1,81 @@
-"""Mutator -- SkillOpt's optimizer-model operator: build the reflection prompt,
-call the optimizer agent, extract the candidate, enforce the edit budget.
+"""Mutator -- the optimizer-model operator: render the rollout evidence, let the
+agent (optionally) digest it, build the edit prompt, call the agent, apply the
+edit, enforce the edit budget.
 
-propose() returns (candidate_src or None, transcript). None means the step is
-skipped (budget blown twice, unparseable reply, or agent failure) -- the loop
-treats that as a rejection and moves on. The actual LLM call is delegated to an
-agent (agents.SingleCoder / OptimizerTeam) via its complete() interface, so the
-single-vs-team ablation never touches this file.
+Two-phase, but agent-agnostic:
+  1. evidence = the rendered failures / protected successes / dead-ends block.
+  2. digest   = agent.digest(evidence)  -- SingleCoder returns it verbatim (one
+     call total); TieredCoder runs a cheap Haiku pass that shrinks it.
+  3. edits    = agent.complete(edit_prompt(digest), tier) as SEARCH/REPLACE
+     blocks (full-module fenced block is the fallback).
+Because both steps go through the same complete()/digest() seam, the
+single-vs-tiered ablation never touches this file.
+
+propose() returns (candidate SearchProgram or None, transcript). None means the
+step is skipped (budget blown twice, unparseable reply, transient agent
+failure). AgentUnavailable (hard CLI/spend limit) propagates so the loop can
+stop the campaign instead of burning the remaining steps.
 """
-import re
-
+from ..agents.single import AgentUnavailable
 from ..artifact.program import SearchProgram
+from .edits import EditError, apply_edits, extract_code, parse_edit_blocks
 
 
-def extract_code(text):
-    blocks = re.findall(r"```(?:python)?[ \t]*\n(.*?)```", text, re.S)
-    if not blocks:
-        raise ValueError("no fenced code block in LLM response")
-    return blocks[-1].strip() + "\n"
+def _fmt_metrics(m):
+    return (f"recall@20={m['recall@20']:.2f} hit@1={m['hit@1']:.0f} "
+            f"hit@5={m.get('hit@5', 0.0):.0f} mrr={m['mrr']:.2f}")
 
 
 def _format_failures(failures):
     if not failures:
-        return "(none -- every rollout query had perfect recall@20)"
+        return "(none -- every rollout query had perfect recall@20 and hit@1)"
     parts = []
     for i, f in enumerate(failures, 1):
-        sec = [f"[{i}] query: {f['query']}"]
-        sec.append(f"    recall@20={f['recall@20']:.2f} hit@1={f['hit@1']:.0f} "
-                   f"mrr={f['mrr']:.2f}  gold ids: {f['gold_ids']}")
-        for nid, text in f["missed"]:
-            sec.append(f"    MISSED gold {nid}: {text}")
-        sec.append(f"    retrieved top-20 ids: {f['retrieved']}")
+        sec = [f"[{i}] ({f['bucket']}) {f['query']}", f"    {_fmt_metrics(f['metrics'])}"]
         if f.get("error"):
             sec.append(f"    ERROR: {f['error']}")
+        for nid, text in f["missed_gold"]:
+            sec.append(f"    MISSED gold {nid} (absent from top-20): {text}")
+        for rank, score, nid in f["gold_ranks"]:
+            sec.append(f"    gold {nid} retrieved but ranked #{rank} (your score {score:.3f})")
+        for nid, score, text in f["top_wrong"]:
+            sec.append(f"    out-ranking NON-gold {nid} (your score {score:.3f}): {text}")
         parts.append("\n".join(sec))
     return "\n".join(parts)
 
 
-def _format_buffer(buffer_entries):
-    if not buffer_entries:
+def _format_wins(wins):
+    if not wins:
+        return ""
+    lines = [f"- {w['query']}  ({_fmt_metrics(w['metrics'])})" for w in wins]
+    return ("## Currently working -- do NOT regress these\n"
+            + "\n".join(lines) + "\n\n")
+
+
+def _format_buffer(entries):
+    if not entries:
         return "(none yet)"
-    parts = []
-    for e in buffer_entries:
-        after = e.get("score_after")
-        after_s = f"{after['recall@20']:.4f}" if after else "n/a (failed before gate)"
-        parts.append(
-            f"- step {e['step']}: recall@20 {e['score_before']['recall@20']:.4f} -> "
-            f"{after_s}; reason: {e['reason']}\n{e['diff']}")
-    return "\n".join(parts)
+    return "\n".join(f"- step {e['step']}: {e['summary']}" for e in entries)
 
 
-def build_prompt(incumbent_src, primitives_doc, failures, buffer_entries,
-                 max_edits, safe_builtins, momentum=""):
-    momentum_block = f"\n## Search momentum (what has been working)\n{momentum}\n" if momentum else ""
+def format_evidence(failures, wins, buffer_entries):
+    """The rollout evidence block -- what agent.digest() compresses."""
+    return f"""## Worst failures from the latest rollout (train queries)
+{_format_failures(failures)}
+
+{_format_wins(wins)}## Previously rejected edits (did NOT improve the gate -- do not repeat)
+{_format_buffer(buffer_entries)}"""
+
+
+def build_prompt(incumbent_src, primitives_doc, digest, max_edits, safe_builtins):
     return f"""\
 You are optimizing a Python retrieval program for STaRK-prime, a biomedical \
-knowledge-graph QA benchmark. Given a natural-language query, the program \
-must return candidate node ids ranked by relevance. The metric being \
-optimized is recall@20 (secondary: hit@1, MRR), averaged over held-out \
-queries. Gold answer sets often contain MANY nodes (median ~10), and answers \
-can be of any node type.
+knowledge-graph QA benchmark. Given a natural-language query, the program must \
+return candidate node ids ranked by relevance. The gate optimizes a blend of \
+recall@20 (gold anywhere in top-20) AND ranking quality (hit@1 / MRR). Ranking \
+is the current weakness: when gold IS retrieved but ranked below non-gold nodes, \
+fix the SCORING, not the recall. Gold answer sets often contain MANY nodes \
+(median ~10), of any node type.
 
 ## Current program (the incumbent)
 ```python
@@ -77,21 +94,23 @@ can be of any node type.
 ## Graph API
 {primitives_doc}
 
-## Worst failures from the latest rollout (train queries the incumbent missed)
-{_format_failures(failures)}
-
-## Previously rejected edits (these did NOT improve val recall@20 -- do not repeat them)
-{_format_buffer(buffer_entries)}{momentum_block}
+## Evidence (latest rollout)
+{digest}
 
 ## Your task
-1. Diagnose in a few sentences WHY the incumbent misses these gold nodes
-   (look at what the missed nodes' texts share, and which primitives could
-   reach them).
-2. Propose ONE improved program. Edit budget: at most {max_edits} changed
-   regions (difflib hunks) vs the incumbent -- prefer small, targeted edits
-   over rewrites. For each edit give a one-line rationale.
-3. End your reply with the COMPLETE new module in a single ```python fenced
-   block (it replaces the whole file; it must compile under the contract).
+1. Diagnose in a few sentences WHY the incumbent misses or mis-ranks these gold
+   nodes (look at what the missed/out-ranking node texts share and which
+   primitives could reach or re-rank them).
+2. Propose your change as up to {max_edits} SEARCH/REPLACE blocks. Each block:
+   <<<<<<< SEARCH
+   <exact contiguous lines copied verbatim from the incumbent>
+   =======
+   <the replacement lines>
+   >>>>>>> REPLACE
+   The SEARCH text must match the incumbent EXACTLY and appear exactly once.
+   Prefer small, targeted edits. Give a one-line rationale per block.
+   (Only if a wholesale rewrite is unavoidable, you may instead end with the
+   COMPLETE module in ONE ```python block -- but edit blocks are preferred.)
 """
 
 
@@ -101,33 +120,66 @@ class Mutator:
         self._doc = primitives_doc
         self._safe_builtins = safe_builtins
 
-    def propose(self, program: SearchProgram, failures, buffer_entries,
-                edit_budget, momentum=""):
+    @property
+    def call_counts(self):
+        """Per-model call tally (for MLflow cost reporting); {} if unsupported."""
+        return getattr(self._agent, "call_counts", {})
+
+    def _candidate(self, program, resp):
+        """Apply the response. -> (SearchProgram, n_edits) or (None, 0) if the
+        reply yields no usable program. EditError on blocks falls back to the
+        full-module path before giving up."""
+        blocks = parse_edit_blocks(resp)
+        if blocks:
+            try:
+                return program.with_src(apply_edits(program.src, blocks)), len(blocks)
+            except EditError:
+                pass  # malformed/anchorless blocks -> try a full module instead
+        try:
+            cand = program.with_src(extract_code(resp))
+        except ValueError:
+            return None, 0
+        return cand, program.edit_distance(cand)
+
+    def propose(self, program: SearchProgram, failures, wins, buffer_entries,
+                edit_budget, plateau=False):
         """-> (candidate SearchProgram or None, transcript:str)."""
-        prompt = build_prompt(program.src, self._doc, failures, buffer_entries,
-                              edit_budget, self._safe_builtins, momentum)
-        transcript = [f"# PROMPT\n\n{prompt}"]
+        evidence = format_evidence(failures, wins, buffer_entries)
+        transcript = [f"# EVIDENCE\n\n{evidence}"]
+        try:
+            digest = self._agent.digest(evidence)
+        except AgentUnavailable:
+            raise
+        except Exception as e:           # analyst hiccup -> use raw evidence
+            transcript.append(f"# ANALYST FAILED -- using raw evidence\n\n{e}")
+            digest = evidence
+        if digest is not evidence:
+            transcript.append(f"# DIGEST (analyst)\n\n{digest}")
+
+        prompt = build_prompt(program.src, self._doc, digest, edit_budget,
+                              self._safe_builtins)
+        transcript.append(f"# PROMPT\n\n{prompt}")
+        tier = "architect" if plateau else "editor"
         for attempt in (1, 2):
             try:
-                resp = self._agent.complete(prompt)
+                resp = self._agent.complete(prompt, tier=tier)
+            except AgentUnavailable:
+                raise
             except Exception as e:
                 transcript.append(f"# AGENT CALL FAILED (attempt {attempt})\n\n{e}")
                 return None, "\n\n---\n\n".join(transcript)
-            transcript.append(f"# RESPONSE (attempt {attempt})\n\n{resp}")
-            try:
-                cand_src = extract_code(resp)
-            except ValueError as e:
-                prompt += (f"\n\nYour previous reply had no fenced code block "
-                           f"({e}). Reply again, ending with the complete module "
-                           "in ONE ```python block.")
+            transcript.append(f"# RESPONSE ({tier}, attempt {attempt})\n\n{resp}")
+
+            cand, n_edits = self._candidate(program, resp)
+            if cand is None:
+                prompt += ("\n\nYour previous reply contained neither a usable "
+                           "SEARCH/REPLACE block (the SEARCH text must match the "
+                           "incumbent exactly) nor a ```python module. Reply again.")
                 continue
-            cand = program.with_src(cand_src)
-            hunks = program.edit_distance(cand)
-            if hunks <= edit_budget:
+            if n_edits <= edit_budget:
                 return cand, "\n\n---\n\n".join(transcript)
-            prompt += (f"\n\nYour previous candidate changed {hunks} regions but "
+            prompt += (f"\n\nYour previous candidate changed {n_edits} regions but "
                        f"the budget is {edit_budget}. Keep your best {edit_budget} "
-                       "edits, revert the rest, and reply again with the complete "
-                       "module in ONE ```python block.")
-        transcript.append("# SKIPPED: edit budget exceeded twice")
+                       "edits and reply again.")
+        transcript.append("# SKIPPED: no in-budget candidate after 2 attempts")
         return None, "\n\n---\n\n".join(transcript)

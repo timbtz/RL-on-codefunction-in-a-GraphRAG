@@ -1,8 +1,13 @@
-"""RejectedBuffer -- negative replay. Every rejected candidate's diff + score
-drop is remembered; the last-N are rendered into the next reflection prompt so
-the mutator stops re-proposing dead ends.
+"""RejectedBuffer -- negative replay. Every rejected candidate is remembered as
+a ONE-LINE summary carrying the edit gist and the score delta it caused (e.g.
+"k=60 -> k=100 => recall@20 -0.04; gate not improved"); the last-N enter the
+next reflection prompt so the mutator stops re-proposing dead ends.
 
-Stage-1: a flat ring (no epochs). The full buffer is persisted as an artifact;
+Storing a summary (not the full unified diff) is deliberate: in run 3 the raw
+diff dump was ~60% of the prompt and buried the actual failure signal. The
+quantified delta steers better than a bare diff anyway (SkillOpt finding).
+
+Stage-1: a flat ring (no epochs); the full buffer is persisted as an artifact,
 only the last `context_n` entries enter the prompt.
 """
 import json
@@ -13,14 +18,8 @@ class RejectedBuffer:
         self.entries = []
         self.context_n = context_n
 
-    def add(self, step, diff, score_before, score_after, reason):
-        self.entries.append({
-            "step": step,
-            "reason": reason,
-            "score_before": score_before,   # plain dict, JSON-safe
-            "score_after": score_after,     # dict or None
-            "diff": diff,
-        })
+    def add(self, step, summary):
+        self.entries.append({"step": step, "summary": summary})
 
     def recent(self):
         return self.entries[-self.context_n:]

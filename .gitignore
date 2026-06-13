@@ -1,1 +1,7 @@
+# Large embedding cache
 graphretr-demo/emb_cache.npy
+
+# Agent / planning / meta scratch — not part of the program
+.agents/
+META/
+Research/

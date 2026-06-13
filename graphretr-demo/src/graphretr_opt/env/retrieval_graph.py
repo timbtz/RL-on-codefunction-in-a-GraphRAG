@@ -1,29 +1,57 @@
 """RetrievalGraph -- the object the candidate program sees as `G`.
 
 Holds one read-only backend connection, a primitive cache, and the query
-embedder, and exposes the seven-method closed DSL (layer 1, immutable). Every
-method: validates args via primitives.py, emits ONE parameterized capped query
+embedder, and exposes the closed DSL (layer 1, immutable). Every method:
+validates args via primitives.py, emits ONE parameterized capped query
 through the backend's ro_query, returns node-id-keyed plain-Python data (never
 raw graph objects), and memoizes the result.
+
+G.extract is the one LLM-backed primitive: a FIXED-prompt, fixed-schema
+query-understanding call. It only accepts the exact query currently being
+executed (the sandbox pins it), so a program cannot loop it over node texts,
+and its result is cached in memory AND on disk -- at most one billed call per
+unique query, ever. The prompt is not program-editable: the query->types
+mapping cannot be overfitted into candidate source the way run1/run2's
+hardcoded keyword arrays were.
 
 All collaborators are underscore-prefixed: the sandbox AST-gate forbids any
 `._x` attribute access in candidate code, so the program's only surface is the
 public methods + the read-only allowlist properties + describe().
 """
+import json
+import os
+
 import numpy as np
 
 from .cache import PrimitiveCache
 from .embedder import QueryEmbedder
 from . import primitives as P
 
+_EXTRACT_SYSTEM = """\
+You are a query analyzer for a biomedical knowledge graph. Given one natural-
+language question, return ONLY a JSON object with these keys:
+  "keywords":      up to 6 salient entity names/phrases copied from the question
+                   (the things to look up; no question words).
+  "anchor_ntypes": node types of the entities the question MENTIONS.
+  "answer_ntype":  the single node type the ANSWER should be, or null.
+  "rel_types":     up to 5 relation types likely connecting anchors to answers.
+Use ONLY these exact strings.
+node types: {ntypes}
+relation types: {rel_types}"""
+
 
 class RetrievalGraph:
     def __init__(self, cfg, backend, cache: PrimitiveCache = None,
-                 embedder: QueryEmbedder = None):
+                 embedder: QueryEmbedder = None, llm_budget=None):
         self._cfg = cfg
         self._backend = backend
         self._cache = cache or PrimitiveCache()
         self._embedder = embedder or QueryEmbedder()
+        self._llm_budget = llm_budget
+        self._llm_calls = 0          # extract() invocations; sandbox reads the delta
+        self._pinned_query = None    # set by Sandbox.run; extract() only accepts this
+        self._extract_disk = os.path.join(cfg.runs_dir, "extract_cache.json")
+        self._extract_mem = None     # lazy-loaded disk cache
 
         # One-time engine safety config (global to our container alone).
         backend.configure("TIMEOUT_MAX", 10_000)
@@ -46,6 +74,10 @@ class RetrievalGraph:
 
     def _cap(self, x, name, hi):
         return P.clamp(x, name, hi)
+
+    def _pin_query(self, query):
+        """Trusted-caller hook (Sandbox.run): the only text extract() accepts."""
+        self._pinned_query = query
 
     # -------------------------------------------------------------- primitives
 
@@ -180,6 +212,81 @@ class RetrievalGraph:
         sims.sort(key=lambda t: t[1], reverse=True)
         return list(self._cache.put(key, sims[:top]))
 
+    def text_search(self, text, k=20):
+        """Full-text (BM25-style) keyword search over node documents.
+        -> [(node_id, score)], score descending, at most k. The text is
+        tokenized to alphanumeric terms OR-ed together; punctuation and
+        sub-3-char tokens are dropped."""
+        P.nonempty_str(text, "text")
+        k = self._cap(k, "k", self._cfg.max_fanout)
+        toks, seen = [], set()
+        for w in "".join(c if c.isalnum() else " " for c in text.lower()).split():
+            if len(w) >= 3 and w not in seen:
+                seen.add(w)
+                toks.append(w)
+        toks = toks[:24]
+        if not toks:
+            return []
+        expr = "|".join(toks)
+        key = ("text_search", expr, k)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return list(hit)
+        rows = self._ro(
+            "CALL db.idx.fulltext.queryNodes('Entity', $q) YIELD node, score "
+            f"RETURN node.id, score ORDER BY score DESC LIMIT {k}",
+            {"q": expr})
+        out = [(int(r[0]), float(r[1])) for r in rows]
+        return list(self._cache.put(key, out))
+
+    def extract(self, text):
+        """LLM query analysis (fixed prompt, fixed schema). Accepts ONLY the
+        current query q. -> {'keywords': [str], 'anchor_ntypes': [str],
+        'answer_ntype': str|None, 'rel_types': [str]} -- type/relation fields
+        validated against the allowlists (invalid values dropped, never raised).
+        Cached on disk: repeat queries are free."""
+        P.nonempty_str(text, "text")
+        if text != self._pinned_query:
+            raise ValueError("extract() accepts only the current query q")
+        if self._llm_budget is None:
+            raise ValueError("extract() is not enabled (no OPENAI_API_KEY)")
+        self._llm_calls += 1
+        if self._extract_mem is None:
+            self._extract_mem = (json.load(open(self._extract_disk))
+                                 if os.path.exists(self._extract_disk) else {})
+        hit = self._extract_mem.get(text)
+        if hit is not None:
+            return json.loads(json.dumps(hit))  # defensive copy
+        system = _EXTRACT_SYSTEM.format(ntypes=list(self._allow.ntypes),
+                                        rel_types=list(self._allow.rel_types))
+        raw = self._llm_budget.chat_json(system, text,
+                                         model=self._cfg.extract_model)
+        out = self._validate_extract(raw)
+        self._extract_mem[text] = out
+        os.makedirs(os.path.dirname(self._extract_disk), exist_ok=True)
+        json.dump(self._extract_mem, open(self._extract_disk, "w"))
+        return json.loads(json.dumps(out))
+
+    def _validate_extract(self, raw):
+        def strs(v, cap):
+            v = v if isinstance(v, list) else []
+            return [s.strip()[:80] for s in v
+                    if isinstance(s, str) and s.strip()][:cap]
+        ans = raw.get("answer_ntype") if isinstance(raw, dict) else None
+        raw = raw if isinstance(raw, dict) else {}
+        ans = ans if ans in self._allow.ntypes else None
+        # ntype 'gene/protein' <-> vector-index label 'gene_protein'
+        label = ans.replace("/", "_") if ans else None
+        return {
+            "keywords": strs(raw.get("keywords"), 6),
+            "anchor_ntypes": [t for t in strs(raw.get("anchor_ntypes"), 4)
+                              if t in self._allow.ntypes],
+            "answer_ntype": ans,
+            "answer_label": label if label in self._allow.labels else None,
+            "rel_types": [r for r in strs(raw.get("rel_types"), 5)
+                          if r in self._allow.rel_types],
+        }
+
     def get_text(self, ids, limit=50):
         """Fetch node documents. -> {node_id: text}, at most `limit` entries."""
         ids = P.ids_in(ids)
@@ -224,9 +331,22 @@ has a {cfg.query_timeout_ms} ms timeout (a timeout raises -- catch nothing, just
 modest). Invalid arguments raise ValueError.
 
 G.vector_search(text, k=20, label=None) -> list[(node_id:int, similarity:float)]
-    ANN over node-text embeddings (all-MiniLM-L6-v2, cosine). similarity ~[0,1],
-    sorted descending. label=None searches all 10 node-type labels and merges;
+    ANN over node-text embeddings (cosine). similarity ~[0,1], sorted
+    descending. label=None searches all 10 node-type labels and merges;
     label='disease' (etc.) restricts to one type.
+G.text_search(text, k=20) -> list[(node_id:int, score:float)]
+    Full-text (BM25-style) keyword search over node documents, score
+    descending. Complements vector_search: exact names/rare terms score high
+    here even when embeddings miss them. Combine both with rank fusion.
+G.extract(q) -> dict
+    LLM analysis of the query (accepts ONLY the exact `q` your search() was
+    called with; cached, so repeat calls are free). Returns
+    {{'keywords': [str], 'anchor_ntypes': [str], 'answer_ntype': str|None,
+    'answer_label': str|None, 'rel_types': [str]}} -- all type/relation values
+    already validated against the allowlists below (answer_label is the
+    vector_search `label=` form of answer_ntype). Use it to pick vector_search
+    labels, filter_nodes ntypes and get_neighbors/k_hop_expand rel_types
+    instead of hardcoding keyword tables.
 G.get_neighbors(ids, rel_type=None, direction='out', limit=50) -> list[(src_id, rel_type:str, dst_id)]
     1-hop edges of the given node id(s). direction: 'out'|'in'|'both'.
 G.k_hop_expand(ids, k=2, rel_type=None, max_nodes=200) -> list[node_id]

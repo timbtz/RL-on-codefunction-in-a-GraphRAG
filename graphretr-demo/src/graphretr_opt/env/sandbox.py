@@ -51,6 +51,7 @@ class _Timeout(Exception):
 class RunStats:
     latency_s: float
     queries: int
+    llm_calls: int = 0
 
 
 class time_limit:
@@ -176,6 +177,10 @@ class Sandbox:
         timeout_s = self._default_timeout_s if timeout_s is None else timeout_s
         backend = getattr(self._graph, "_backend", None)
         q0 = getattr(backend, "query_count", 0)
+        l0 = getattr(self._graph, "_llm_calls", 0)
+        pin = getattr(self._graph, "_pin_query", None)
+        if pin:
+            pin(query)
         t0 = time.time()
         try:
             with time_limit(timeout_s):
@@ -188,7 +193,8 @@ class Sandbox:
             raise SandboxError(f"crashed on {query[:120]!r}: {type(e).__name__}: {e}")
         pred = validate_pred(pred)
         stats = RunStats(latency_s=time.time() - t0,
-                         queries=getattr(backend, "query_count", q0) - q0)
+                         queries=getattr(backend, "query_count", q0) - q0,
+                         llm_calls=getattr(self._graph, "_llm_calls", l0) - l0)
         return pred, stats
 
     def probe(self, fn, probe_queries, timeout_s=None):

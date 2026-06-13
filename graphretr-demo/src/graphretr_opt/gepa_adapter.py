@@ -7,13 +7,13 @@ reward so GEPA drives them:
   evaluate(candidate)        -> Sandbox.run + RewardModel.score, returning the
                                 score AND a textual trace (retrieved-vs-gold
                                 node IDs = GEPA's Actionable Side Information).
-  make_reflective_dataset()  <- FastLoop._worst_failures, reshaped to GEPA's
+  make_reflective_dataset()  <- FastLoop._reflect, reshaped to GEPA's
                                 reflective-dataset format.
 
 Selection becomes GEPA's native Pareto-over-validation frontier + merge.
-EditBudget / RejectedBuffer / MomentumField move from driving FastLoop to
-CONSTRAINING GEPA's reflection LM (GEPA lacks all three). That is the
-"fork GEPA + graft SkillOpt" decision made concrete.
+EditBudget / RejectedBuffer move from driving FastLoop to CONSTRAINING GEPA's
+reflection LM (GEPA lacks both). That is the "fork GEPA + graft SkillOpt"
+decision made concrete.
 """
 
 

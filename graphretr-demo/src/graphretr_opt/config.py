@@ -28,7 +28,11 @@ class Config:
     # data / gate
     gate_size: int = 200
     gate_seed: int = 42
-    gate_metric: str = "recall@20"
+    gate_metric: str = "recall@20"          # axis used by 'strict' mode
+    gate_mode: str = "strict"               # strict | blend | dominance
+    gate_blend: str = "recall@20:0.6,mrr:0.4"  # weights for 'blend' mode
+    gate_rotate_every: int = 0              # 0 = fixed gate; N = resample gate every N steps
+    gate_max_complexity: float = 0.0        # 0 = off; else candidates above this AST-complexity are ineligible
 
     # fast loop
     steps: int = 30
@@ -38,6 +42,7 @@ class Config:
     edit_schedule: str = "const"   # const | cosine | linear
     max_edits: int = 4             # L_max
     min_edits: int = 1             # L_min (floor for decaying schedules)
+    stop_after_stale: int = 0      # 0 = run all `steps`; else stop after N non-accepts
 
     # hard caps / safety walls
     query_timeout_ms: int = 2000
@@ -47,9 +52,19 @@ class Config:
     crash_frac_limit: float = 0.10
 
     # mutator
+    mutator_agent: str = "single"           # single | tiered (model tiering)
     mutator_backend: str = "cli"
-    mutator_model: str = "opus"
+    mutator_model: str = "opus"             # SingleCoder model (tiered ignores it)
+    analyst_model: str = "haiku"            # tiered: cheap evidence digest
+    editor_model: str = "sonnet"            # tiered: routine edits
+    architect_model: str = "opus"           # tiered: plateau escalation
+    architect_plateau: int = 3              # consecutive non-accepts before escalating
     llm_timeout_s: int = 900
+
+    # openai (embedder + G.extract); key comes from .env / OPENAI_API_KEY
+    embedder: str = "minilm"                # minilm | openai_small (needs re-indexed graph)
+    extract_model: str = "gpt-4o-mini"      # model behind G.extract
+    openai_budget_usd: float = 5.0          # hard $ ceiling, persisted runs/openai_usage.json
 
     # strategy arm
     strategy: str = "vector_only"
