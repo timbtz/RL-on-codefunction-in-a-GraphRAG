@@ -31,6 +31,8 @@ def main(argv=None):
     pf.add_argument("--campaign-name", required=True)
     pf.add_argument("--strategy", default=None,
                     help="must match the strategy the campaign was run with")
+    pf.add_argument("--test-n", type=int, default=0,
+                    help="score a deterministic N-query test subsample (0 = full split)")
 
     pa = sub.add_parser("ablate", help="seed-only embedder-vs-extractor attribution")
     pa.add_argument("--strategies", default="vector_only,hybrid_rrf,extract_first",
@@ -49,7 +51,7 @@ def main(argv=None):
     elif args.cmd == "optimize":
         campaign.optimize(steps=args.steps, campaign=args.campaign_name)
     elif args.cmd == "final":
-        campaign.final_test(args.campaign_name)
+        campaign.final_test(args.campaign_name, test_n=args.test_n)
     elif args.cmd == "ablate":
         campaign.ablate(tuple(s.strip() for s in args.strategies.split(",") if s.strip()),
                         test_n=args.test_n, campaign=args.campaign_name)

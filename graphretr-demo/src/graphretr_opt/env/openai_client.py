@@ -33,6 +33,28 @@ class BudgetExceeded(RuntimeError):
     pass
 
 
+def step_cost_delta(prev, cur, accepted, ceiling_usd=0.0):
+    """Per-step OpenAI spend from two `OpenAIBudget.snapshot()`s, split by gate
+    outcome -- the `$/accepted-edit` axis (GEPA/AlphaEvolve cost reporting).
+
+    `accepted` routes this step's tokens to `tokens_accepted` (spend that bought
+    an edit) vs `tokens_rejected` (spend burned on a rejected proposal). Returns
+    a flat metrics dict for `tracker.log_metrics(..., step=step)`.
+    """
+    d_tok = ((cur["tokens_in"] + cur["tokens_out"])
+             - (prev["tokens_in"] + prev["tokens_out"]))
+    d_usd = round(cur["usd"] - prev["usd"], 6)
+    out = {
+        "tokens_accepted": d_tok if accepted else 0,
+        "tokens_rejected": 0 if accepted else d_tok,
+        "usd_step": d_usd,
+        "usd_cumulative": cur["usd"],
+    }
+    if ceiling_usd:
+        out["usd_vs_ceiling"] = cur["usd"] / float(ceiling_usd)
+    return out
+
+
 class OpenAIBudget:
     def __init__(self, ledger_path, ceiling_usd=5.0):
         self._ledger_path = ledger_path
@@ -48,6 +70,17 @@ class OpenAIBudget:
     @property
     def spent_usd(self):
         return self._usage["usd"]
+
+    def snapshot(self):
+        """Immutable copy of the running ledger -- the boundary for per-step cost
+        attribution. Take one before and one after a step; `step_cost_delta`
+        turns the pair into per-step spend split by gate outcome."""
+        with self._lock:
+            return {"requests": self._usage["requests"],
+                    "tokens_in": self._usage["tokens_in"],
+                    "tokens_out": self._usage["tokens_out"],
+                    "usd": self._usage["usd"],
+                    "by_model": {m: dict(v) for m, v in self._usage["by_model"].items()}}
 
     def _api(self):
         if self._client is None:

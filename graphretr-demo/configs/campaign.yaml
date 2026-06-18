@@ -48,7 +48,7 @@ llm_timeout_s: 900
 # openai (embedder + G.extract); key in .env, ledger at runs/openai_usage.json
 embedder: openai_small
 extract_model: gpt-4o-mini  # model behind the fixed-prompt G.extract
-openai_budget_usd: 5.0      # hard $ ceiling shared by embedder + extract
+openai_budget_usd: 10.0     # hard $ ceiling shared by embedder + extract
 
 # strategy arm (layer 3): which seed family this campaign descends
 # (override per run: python -m graphretr_opt.cli optimize --strategy extract_first)

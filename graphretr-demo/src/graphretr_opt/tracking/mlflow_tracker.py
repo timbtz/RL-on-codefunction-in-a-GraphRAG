@@ -7,11 +7,33 @@ runs (mlflow.dspy.autolog) without changing call sites.
 
 Metric names are sanitized ('@' is not a legal MLflow metric character).
 """
+import os
+
 import mlflow
 
 
 def mkey(name: str) -> str:
     return name.replace("@", "_at_")
+
+
+def maybe_enable_openai_tracing() -> bool:
+    """Phase F (OPTIONAL, gated): capture OpenAI primitive calls (G.extract /
+    G.llm_rerank) as spans in MLflow's trace UI -- still "all in MLflow".
+
+    OFF by default. Span cardinality is fine for low-volume paths (ablations,
+    `final --test-n`) but would balloon storage on a full 33k-request campaign,
+    so this is opt-in via MLFLOW_TRACE_OPENAI=1 and must NEVER be enabled on
+    `optimize`. Returns True iff autolog was actually turned on.
+    """
+    if os.environ.get("MLFLOW_TRACE_OPENAI") != "1":
+        return False
+    try:
+        mlflow.openai.autolog()
+        print("[tracking] MLflow OpenAI tracing ENABLED (MLFLOW_TRACE_OPENAI=1)")
+        return True
+    except Exception as e:  # missing extra / version skew -- never fatal
+        print(f"[tracking] OpenAI autolog unavailable: {e}")
+        return False
 
 
 class MlflowTracker:
@@ -26,6 +48,11 @@ class MlflowTracker:
         if params:
             mlflow.log_params({k: str(v) for k, v in params.items()})
         return self
+
+    def set_tags(self, tags: dict):
+        """Run-level tags (approach/strategy/config_hash) -- what MLflow's compare
+        view filters/groups on. Stringified for consistency with params."""
+        mlflow.set_tags({k: str(v) for k, v in tags.items() if v is not None})
 
     def log_metrics(self, metrics: dict, step=None):
         mlflow.log_metrics({mkey(k): float(v) for k, v in metrics.items()}, step=step)

@@ -11,7 +11,7 @@ import random
 import time
 from dataclasses import replace
 
-from .config import load_config, load_strategy
+from .config import load_config, load_strategy, dump_resolved_config
 from .data.substrate import Substrate
 from .env.backends.falkordb import FalkorDBBackend
 from .env.cache import PrimitiveCache
@@ -28,7 +28,7 @@ from .agents.team import TieredCoder
 from .optimizer.edit_budget import EditBudget
 from .optimizer.mutator import Mutator
 from .optimizer.fast_loop import FastLoop
-from .tracking.mlflow_tracker import MlflowTracker
+from .tracking.mlflow_tracker import MlflowTracker, maybe_enable_openai_tracing
 
 
 class Campaign:
@@ -48,6 +48,7 @@ class Campaign:
                                   ceiling_usd=cfg.openai_budget_usd)
             print(f"[campaign] openai budget: ${budget.spent_usd:.2f} spent of "
                   f"${cfg.openai_budget_usd:.2f} ceiling (embedder={cfg.embedder})")
+        self.budget = budget  # shared OpenAI gateway; FastLoop reads it for per-step cost
         self.graph = RetrievalGraph(cfg, backend, PrimitiveCache(),
                                     make_embedder(cfg, budget), llm_budget=budget)
         self.sandbox = Sandbox(self.graph, default_timeout_s=cfg.probe_timeout_s)
@@ -85,13 +86,17 @@ class Campaign:
         seed = self._seed_program()
         run_dir = os.path.join(cfg.runs_dir, campaign)
         os.makedirs(run_dir, exist_ok=True)
+        cfg_path, cfg_hash = dump_resolved_config(cfg, run_dir)
 
         with MlflowTracker(cfg).start(campaign, params={
             **{k: v for k, v in vars(cfg).items() if k != "root"},
             "campaign": campaign, "steps": steps, "git_sha": _git_sha(),
+            "config_hash": cfg_hash,
         }) as tracker:
+            tracker.set_tags({"approach": campaign, "strategy": cfg.strategy,
+                              "config_hash": cfg_hash})
             loop = FastLoop(cfg, self.graph, self.sandbox, self.reward, mutator,
-                            edit_budget, tracker, self.archive)
+                            edit_budget, tracker, self.archive, budget=self.budget)
             result = loop.run(self.substrate, seed, steps, campaign)
             tracker.log_artifacts(run_dir)
         print(f"[campaign] best program -> {os.path.join(run_dir, 'best_search.py')}")
@@ -102,6 +107,7 @@ class Campaign:
         cfg = self.cfg
         run_dir = os.path.join(cfg.runs_dir, campaign)
         os.makedirs(run_dir, exist_ok=True)
+        cfg_path, cfg_hash = dump_resolved_config(cfg, run_dir)
         gate = self.substrate.gate_idxs(run_dir, cfg.gate_size, cfg.gate_seed)
         probes = self._probe_queries()
         seed = self._seed_program()
@@ -110,7 +116,11 @@ class Campaign:
         mutator = self._make_mutator()
 
         with MlflowTracker(cfg).start(campaign, params={
-            k: v for k, v in vars(cfg).items() if k != "root"}) as tracker:
+                **{k: v for k, v in vars(cfg).items() if k != "root"},
+                "config_hash": cfg_hash}) as tracker:
+            tracker.set_tags({"approach": campaign, "strategy": cfg.strategy,
+                              "config_hash": cfg_hash})
+            maybe_enable_openai_tracing()  # Phase F: gated, low-volume path only
             t0 = time.time()
             seed_mv = self.reward.score(seed_fn, gate, src=seed.src,
                                         per_query_timeout_s=cfg.probe_timeout_s)
@@ -156,8 +166,10 @@ class Campaign:
                   "(ceiling ref ~0.381)")
         return seed_mv, one_mv
 
-    def final_test(self, campaign):
-        """The ONLY entrypoint that touches the test split."""
+    def final_test(self, campaign, test_n=0):
+        """The ONLY entrypoint that touches the test split. With test_n>0 scores a
+        deterministic test subsample (same seed family as ablate) -- a cheap honest
+        verdict that keeps the LLM-rerank bill bounded; test_n=0 = full 2801 split."""
         cfg = self.cfg
         run_dir = os.path.join(cfg.runs_dir, campaign)
         best_path = os.path.join(run_dir, "best_search.py")
@@ -168,12 +180,19 @@ class Campaign:
         seed_fn = self.sandbox.compile(seed.src)
         best_fn = self.sandbox.compile(best.src)
         test_idxs = self.substrate.get_test_idxs_I_KNOW_THIS_IS_FINAL()
+        if test_n:
+            test_idxs = sorted(random.Random(cfg.gate_seed).sample(test_idxs, test_n))
         print(f"[final] scoring seed AND best on the locked test split "
-              f"({len(test_idxs)} queries) -- once.")
+              f"({len(test_idxs)} queries{' SUBSAMPLE' if test_n else ''}) -- once.")
 
+        cfg_hash = cfg.config_hash()
         report = {}
         with MlflowTracker(cfg).start("final-test-report", params={
-                "campaign": campaign, "test_queries": len(test_idxs)}) as tracker:
+                "campaign": campaign, "test_queries": len(test_idxs),
+                "config_hash": cfg_hash}) as tracker:
+            tracker.set_tags({"approach": campaign, "strategy": cfg.strategy,
+                              "config_hash": cfg_hash})
+            maybe_enable_openai_tracing()  # Phase F: gated, low-volume path only
             for name, fn, src in (("seed", seed_fn, seed.src), ("best", best_fn, best.src)):
                 t0 = time.time()
                 mv = self.reward.score(fn, test_idxs, src=src, per_query_timeout_s=30)

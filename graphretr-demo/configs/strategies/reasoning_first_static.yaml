@@ -1,0 +1,8 @@
+# Strategy family "reasoning_first_static" -- the no-LLM control for run-5.
+family: reasoning_first_static
+seed: src/graphretr_opt/artifact/seeds/reasoning_first_static.py
+notes: >
+  Structurally identical to reasoning_first but the rerank step is the cosine
+  G.rank_by_text, not G.llm_rerank. The ablation delta reasoning_first minus
+  reasoning_first_static isolates the value of the reasoning signal from the
+  shared candidate-generation + graph-expansion structure.

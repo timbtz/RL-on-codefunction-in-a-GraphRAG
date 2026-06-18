@@ -6,6 +6,7 @@ Precedence: dataclass defaults < configs/campaign.yaml < environment variables
 lines) is read into os.environ first; if it carries ANTHROPIC_API_KEY the
 mutator backend auto-switches to `sdk`.
 """
+import hashlib
 import os
 from dataclasses import dataclass, fields
 
@@ -61,9 +62,11 @@ class Config:
     architect_plateau: int = 3              # consecutive non-accepts before escalating
     llm_timeout_s: int = 900
 
-    # openai (embedder + G.extract); key comes from .env / OPENAI_API_KEY
+    # openai (embedder + G.extract + G.llm_rerank); key comes from .env / OPENAI_API_KEY
     embedder: str = "minilm"                # minilm | openai_small (needs re-indexed graph)
     extract_model: str = "gpt-4o-mini"      # model behind G.extract
+    rerank_model: str = "gpt-4o-mini"       # model behind G.llm_rerank
+    rerank_pool_max: int = 50               # hard cap on the candidate pool sent per rerank call
     openai_budget_usd: float = 5.0          # hard $ ceiling, persisted runs/openai_usage.json
 
     # strategy arm
@@ -72,6 +75,26 @@ class Config:
     @property
     def runs_dir(self):
         return os.path.join(self.root, "runs")
+
+    # ---- resolved-config snapshot + hash (auditability, Phase A) -----------
+    # The full effective config AFTER defaults < campaign.yaml < env < kwargs is
+    # resolved. `root` is excluded: it is a machine-specific absolute path and
+    # would make the hash non-portable (the same run on another checkout would
+    # otherwise look like a different experiment).
+    def resolved_dict(self) -> dict:
+        """All resolved fields except the machine-specific `root`, key-sorted."""
+        d = {f.name: getattr(self, f.name) for f in fields(self) if f.name != "root"}
+        return dict(sorted(d.items()))
+
+    def resolved_yaml(self) -> str:
+        """Deterministic YAML dump of the effective config (stable key order)."""
+        return yaml.safe_dump(self.resolved_dict(), sort_keys=True,
+                              default_flow_style=False)
+
+    def config_hash(self) -> str:
+        """12-hex content hash of `resolved_yaml()`. Same hash => same experiment;
+        a changed hash under an unchanged git_sha flags silent env/CLI drift."""
+        return hashlib.sha256(self.resolved_yaml().encode()).hexdigest()[:12]
 
 
 def _load_dotenv():
@@ -109,6 +132,17 @@ def load_config(**overrides) -> Config:
     kw.update({k: v for k, v in env.items() if v is not None})
     kw.update(overrides)
     return Config(**kw)
+
+
+def dump_resolved_config(cfg: Config, run_dir: str):
+    """Write the effective config to <run_dir>/resolved_config.yaml and return
+    (path, config_hash). The on-disk YAML is byte-identical to what config_hash()
+    hashes, so a reviewer can recompute the hash from the artifact alone."""
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, "resolved_config.yaml")
+    with open(path, "w") as f:
+        f.write(cfg.resolved_yaml())
+    return path, cfg.config_hash()
 
 
 def load_strategy(cfg: Config) -> dict:

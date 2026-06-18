@@ -39,6 +39,14 @@ Use ONLY these exact strings.
 node types: {ntypes}
 relation types: {rel_types}"""
 
+_RERANK_SYSTEM = """\
+You are a relevance judge for a biomedical knowledge-graph search. Given one
+question and a numbered list of candidate nodes (name + type + details), score
+how likely EACH candidate is the entity the question asks for. Judge by
+RELATIONAL relevance and reasoning -- a correct answer can share few words with
+the question, and a wordy near-duplicate can be wrong. Return ONLY a JSON
+object {"scores": {"<index>": <float in 0..1>, ...}} with one entry per index."""
+
 
 class RetrievalGraph:
     def __init__(self, cfg, backend, cache: PrimitiveCache = None,
@@ -52,6 +60,8 @@ class RetrievalGraph:
         self._pinned_query = None    # set by Sandbox.run; extract() only accepts this
         self._extract_disk = os.path.join(cfg.runs_dir, "extract_cache.json")
         self._extract_mem = None     # lazy-loaded disk cache
+        self._rerank_disk = os.path.join(cfg.runs_dir, "llm_rerank_cache.json")
+        self._rerank_mem = None      # lazy-loaded disk cache
 
         # One-time engine safety config (global to our container alone).
         backend.configure("TIMEOUT_MAX", 10_000)
@@ -287,6 +297,55 @@ class RetrievalGraph:
                           if r in self._allow.rel_types],
         }
 
+    def llm_rerank(self, query, ids, top=20):
+        """Reasoning-relevance rerank of candidate ids against the current query
+        (fixed prompt, fixed schema). Accepts ONLY the current query q (the
+        sandbox pins it). The pool is deduped, sorted and hard-capped at
+        cfg.rerank_pool_max, then sent to the LLM with each node's document.
+        -> [(node_id, score in 0..1)] sorted descending, at most `top`; ids the
+        model did not score are omitted. Cached on disk by (query, pool): repeat
+        (query, pool) pairs are free and resume-safe. Metered + costed exactly
+        like extract()."""
+        P.nonempty_str(query, "query")
+        if query != self._pinned_query:
+            raise ValueError("llm_rerank() accepts only the current query q")
+        if self._llm_budget is None:
+            raise ValueError("llm_rerank() is not enabled (no OPENAI_API_KEY)")
+        # Dedup preserving caller order: the candidates reach the LLM in the
+        # order search() ranked them (e.g. dense-rank), so the model keeps that
+        # prior. The cache key is order-INDEPENDENT (sorted), so the same pool
+        # in any order is one billed call.
+        seen, pool = set(), []
+        for nid in P.ids_in(ids):
+            if nid not in seen and len(pool) < self._cfg.rerank_pool_max:
+                seen.add(nid)
+                pool.append(nid)
+        top = self._cap(top, "top", self._cfg.max_fanout)
+        self._llm_calls += 1
+        if self._rerank_mem is None:
+            self._rerank_mem = (json.load(open(self._rerank_disk))
+                                if os.path.exists(self._rerank_disk) else {})
+        ckey = query + "\x00" + ",".join(str(i) for i in sorted(pool))
+        scores = self._rerank_mem.get(ckey)
+        if scores is None:
+            texts = self.get_text(pool, limit=len(pool))
+            lines = "\n".join(f"[{i}] {texts.get(nid, '')[:500]}"
+                              for i, nid in enumerate(pool))
+            raw = self._llm_budget.chat_json(
+                _RERANK_SYSTEM, f"Question: {query}\n\nCandidates:\n{lines}",
+                model=self._cfg.rerank_model, max_tokens=1500)
+            sc = raw.get("scores", {}) if isinstance(raw, dict) else {}
+            scores = {}
+            for i, nid in enumerate(pool):
+                v = sc.get(str(i))
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    scores[str(nid)] = float(v)
+            self._rerank_mem[ckey] = scores
+            os.makedirs(os.path.dirname(self._rerank_disk), exist_ok=True)
+            json.dump(self._rerank_mem, open(self._rerank_disk, "w"))
+        ranked = sorted(scores.items(), key=lambda t: t[1], reverse=True)
+        return [(int(i), s) for i, s in ranked[:top]]
+
     def get_text(self, ids, limit=50):
         """Fetch node documents. -> {node_id: text}, at most `limit` entries."""
         ids = P.ids_in(ids)
@@ -359,6 +418,14 @@ G.shortest_path(a, b, max_len=3) -> list[node_id]
     which is hard-capped at 3).
 G.rank_by_text(ids, query_text, top=20) -> list[(node_id, similarity)]
     Re-rank candidate ids by embedding similarity to query_text, descending.
+G.llm_rerank(q, ids, top=20) -> list[(node_id, score)]
+    LLM reasoning-relevance rerank of a BOUNDED candidate pool against the
+    query (accepts ONLY the exact `q`; pool hard-capped at {cfg.rerank_pool_max},
+    cached by (q, pool) so repeats are free). score in [0,1], descending; ids
+    the model did not score are dropped. Unlike rank_by_text it judges by
+    reasoning, so it can rank a text-dissimilar correct answer above a wordy
+    decoy -- but each unique (q, pool) costs one billed LLM call, so rerank a
+    small dense top-k, not the whole graph.
 G.get_text(ids, limit=50) -> dict[node_id, str]
     Node documents (name + type + details), for inspection/filtering.
 

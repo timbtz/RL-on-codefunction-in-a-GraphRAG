@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from ..agents.single import AgentUnavailable
 from ..artifact.program import SearchProgram
+from ..env.openai_client import step_cost_delta
 from ..env.sandbox import SandboxError
 from ..reward.objectives import QUALITY_KEYS
 from .gate import Gate
@@ -48,7 +49,7 @@ class _ScoreCache:
 
 class FastLoop:
     def __init__(self, cfg, graph, sandbox, reward, mutator, edit_budget,
-                 tracker, archive):
+                 tracker, archive, budget=None):
         self._cfg = cfg
         self._graph = graph
         self._sandbox = sandbox
@@ -57,6 +58,7 @@ class FastLoop:
         self._edit_budget = edit_budget
         self._tracker = tracker
         self._archive = archive
+        self._budget = budget  # OpenAIBudget (or None); per-step cost attribution
         blend = {}
         for part in str(getattr(cfg, "gate_blend", "") or "").split(","):
             if ":" in part:
@@ -168,8 +170,18 @@ class FastLoop:
         stop_stale = int(getattr(cfg, "stop_after_stale", 0) or 0)
         stale = 0
 
+        # --- auditability baselines (Phase B cost split, Phase C lineage) ----
+        # Snapshot the budget AFTER seed scoring + embedder warmup so warmup spend
+        # lands in the baseline, not in step 0's delta (cost-boundary caveat).
+        ceiling = float(getattr(cfg, "openai_budget_usd", 0.0) or 0.0)
+        cost_prev = self._budget.snapshot() if self._budget is not None else None
+        calls_prev = dict(self._mutator.call_counts)
+        lineage_fh = open(os.path.join(run_dir, "lineage.jsonl"), "w")
+        n_accepted, steps_run = 0, 0
+
         for step in range(steps):
             t_step = time.time()
+            parent_prog, parent_sha = prog, prog.sha
             g_idxs, g_tag = _gate_for(step)
             if g_tag != gate_tag:
                 # Gate rotated: re-score the incumbent on the new subsample so the
@@ -259,9 +271,44 @@ class FastLoop:
                              f"mrr {s.get('mrr') - best.get('mrr'):+.4f}")
                 else:
                     delta = "no gate score"
-                gist = prog.change_summary(cand) if cand else "(no candidate)"
+                gist = parent_prog.change_summary(cand) if cand else "(no candidate)"
                 buffer.add(step, f"{gist} => {delta}; {reason}")
                 buffer.save(buf_path)
+
+            # per-step cost split (Phase B): OpenAI spend delta, accept-vs-reject,
+            # plus per-step LLM call counts (the cumulative calls_* go at run end).
+            if cost_prev is not None:
+                cost_cur = self._budget.snapshot()
+                step_metrics.update(step_cost_delta(
+                    cost_prev, cost_cur, bool(step_metrics["accepted"]), ceiling))
+                cost_prev = cost_cur
+            calls_cur = dict(self._mutator.call_counts)
+            for m in set(calls_cur) | set(calls_prev):
+                d = calls_cur.get(m, 0) - calls_prev.get(m, 0)
+                if d:
+                    step_metrics[f"calls_{m}_step"] = d
+            calls_prev = calls_cur
+            if step_metrics["accepted"]:
+                n_accepted += 1
+            steps_run += 1
+
+            # consolidated lineage row (Phase C): one per step, accepted AND
+            # rejected -- a rejected edit tells the proposer what not to retry.
+            lineage_fh.write(json.dumps({
+                "step": step,
+                "parent_sha": parent_sha,
+                "child_sha": cand.sha if cand else None,
+                "change_summary": (parent_prog.change_summary(cand) if cand
+                                   else "(no candidate)"),
+                "metric_vector": s.as_flat() if s is not None else None,
+                "accepted": bool(step_metrics["accepted"]),
+                "reason": reason or "accepted (gate improved)",
+                "tokens_step": (step_metrics.get("tokens_accepted", 0)
+                                + step_metrics.get("tokens_rejected", 0)),
+                "edit_budget": L_t,
+                "gate_tag": gate_tag,
+            }) + "\n")
+            lineage_fh.flush()
 
             self._tracker.log_vector("best_", best, step=step)
             self._tracker.log_metrics(step_metrics, step=step)
@@ -276,6 +323,13 @@ class FastLoop:
                       f"non-accepts (>= stop_after_stale={stop_stale})", flush=True)
                 self._tracker.log_metrics({"stopped_stale_at": step}, step=step)
                 break
+
+        lineage_fh.close()
+        # run-end rollup inputs: accepted_total + usd_total feed $/accepted-edit.
+        summary = {"accepted_total": n_accepted, "steps_run": steps_run}
+        if self._budget is not None:
+            summary["usd_total"] = self._budget.spent_usd
+        self._tracker.log_metrics(summary)
 
         cc = self._mutator.call_counts
         if cc:
