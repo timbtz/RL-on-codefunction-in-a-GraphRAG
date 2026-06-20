@@ -12,6 +12,8 @@ only the last `context_n` entries enter the prompt.
 """
 import json
 
+from ..atomic_io import atomic_write_json
+
 
 class RejectedBuffer:
     def __init__(self, context_n=8):
@@ -32,4 +34,4 @@ class RejectedBuffer:
         return self
 
     def save(self, path):
-        json.dump(self.entries, open(path, "w"), indent=1)
+        atomic_write_json(path, self.entries, indent=1)

@@ -18,6 +18,8 @@ The per-query signal is reciprocal rank (`mrr`) from MetricVector.per_query.
 Members scored on different rotating-gate epochs simply contribute only the
 queries they were scored on -- no cross-epoch rescoring needed.
 """
+from ..artifact.program import SearchProgram
+from ..reward.objectives import MetricVector
 from ..reward.pareto import dominates
 
 _INSTANCE_KEY = "mrr"  # per-query axis used for sole-best counting
@@ -155,3 +157,37 @@ class CandidatePool:
             return None
         key = key or (lambda mv: mv.primary)
         return max(self.members, key=lambda m: key(m.metrics))
+
+    # ----------------------------------------------------------- persistence
+
+    def to_dict(self) -> dict:
+        """Serializable snapshot for the Phase-1 campaign checkpoint. Stores each
+        member's program SOURCE (the sha is derived) + family + full MetricVector
+        (incl. per_query, which the score_cache's flat form drops) + children
+        count, so a resumed run rebuilds the exact selection state."""
+        return {
+            "cap": self.cap,
+            "members": [{
+                "src": m.program.src,
+                "family": m.program.family,
+                "metrics": m.metrics.to_dict(),
+                "children": m.children,
+            } for m in self.members],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict, validate=None) -> "CandidatePool":
+        """Rebuild from `to_dict()`. `validate(src) -> bool` (optional) drops any
+        member whose source no longer compiles -- mirrors openEvolve's defensive
+        reload (prune broken programs rather than abort the whole resume), but
+        without inheriting its monolith. Member order/children are preserved."""
+        pool = cls(cap=int(d.get("cap", 24)))
+        for rec in d.get("members", []):
+            src = rec["src"]
+            if validate is not None and not validate(src):
+                continue
+            prog = SearchProgram(src, family=rec.get("family", "unknown"))
+            member = PoolMember(prog, MetricVector.from_dict(rec["metrics"]))
+            member.children = int(rec.get("children", 0))
+            pool.members.append(member)
+        return pool

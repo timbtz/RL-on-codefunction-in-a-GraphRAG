@@ -48,6 +48,13 @@ class Config:
                                    # after propose); N => feed the sandbox/probe error back into the
                                    # SAME mutator conversation for up to N targeted fixes before rejecting
 
+    # --- Phase 1: live-pool checkpoint/resume + graceful shutdown -----------
+    checkpoint_every: int = 0      # 0 = off; else atomically snapshot runs/<c>/checkpoint.json every N steps
+    resume: bool = False           # on startup, rebuild pool/incumbent/counters from checkpoint.json if present
+    # --- Phase 2: process-based parallel rollout (default = exact serial) ----
+    num_workers: int = 1           # 1 = serial (today's behavior, byte-identical); >1 = process pool for scoring
+    rollout_fanout: int = 1        # candidates proposed+scored per step; 1 = single-candidate step (today)
+
     # --- run-6 optimizer evolution (Phase A/B/D) ----------------------------
     pool_enabled: bool = False     # A2/A3: instance-wise Pareto pool vs single incumbent
     pool_cap: int = 24             # A2: max pool members (frontier + top-K)

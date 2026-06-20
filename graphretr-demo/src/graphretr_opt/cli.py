@@ -26,6 +26,10 @@ def main(argv=None):
     po.add_argument("--campaign-name", default="campaign")
     po.add_argument("--strategy", default=None,
                     help="override the campaign.yaml strategy/seed family")
+    po.add_argument("--resume", action="store_true",
+                    help="resume from runs/<campaign>/checkpoint.json if present")
+    po.add_argument("--checkpoint-every", type=int, default=None,
+                    help="atomically snapshot the live pool every N steps (0=off)")
 
     pf = sub.add_parser("final", help="score seed+best on the locked test split once")
     pf.add_argument("--campaign-name", required=True)
@@ -44,6 +48,10 @@ def main(argv=None):
     args = ap.parse_args(argv)
     overrides = ({"strategy": args.strategy}
                  if getattr(args, "strategy", None) else {})
+    if getattr(args, "resume", False):
+        overrides["resume"] = True
+    if getattr(args, "checkpoint_every", None) is not None:
+        overrides["checkpoint_every"] = args.checkpoint_every
     campaign = Campaign(load_config(**overrides)).boot()
 
     if args.cmd == "stage0":

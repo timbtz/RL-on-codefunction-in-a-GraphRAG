@@ -66,6 +66,18 @@ class MetricVector:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "MetricVector":
+        """Rebuild from `to_dict()` output (Phase-1 checkpoint resume). per_query
+        keys are JSON-stringified on the round-trip, so coerce them back to int:
+        the pool's sole-best counting compares the SAME query idx across members,
+        and a resumed (str-keyed) member must still match a freshly-scored
+        (int-keyed) one or it would silently win/lose every shared query."""
+        d = dict(d)
+        pq = d.get("per_query") or {}
+        d["per_query"] = {int(k): v for k, v in pq.items()}
+        return cls(**d)
+
 
 def code_complexity(src: str) -> float:
     """Cheap static proxy: AST node count + branch/loop/call weighting,

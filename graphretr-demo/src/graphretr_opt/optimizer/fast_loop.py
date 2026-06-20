@@ -10,16 +10,21 @@ returns an ArmResult.
 import json
 import os
 import random
+import signal
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..agents.single import AgentUnavailable
 from ..artifact.program import SearchProgram
+from ..atomic_io import atomic_write_json
 from ..env.openai_client import BudgetExceeded, step_cost_delta
-from ..reward.objectives import QUALITY_KEYS
+from ..env.sandbox import SandboxError
+from ..reward.objectives import MetricVector, QUALITY_KEYS
 from .gate import Gate
 from .pool import CandidatePool
 from .rejected_buffer import RejectedBuffer
+
+CHECKPOINT_VERSION = 1
 
 
 @dataclass
@@ -44,7 +49,7 @@ class _ScoreCache:
     def put(self, sha, mv):
         self._mem[sha] = mv
         self._raw[sha] = mv.as_flat()
-        json.dump(self._raw, open(self._path, "w"), indent=1)
+        atomic_write_json(self._path, self._raw, indent=1)
 
 
 class FastLoop:
@@ -287,6 +292,66 @@ class FastLoop:
         with open(os.path.join(run_dir, "select_holdout.json"), "w") as f:
             json.dump(audit, f, indent=1)
 
+    # ------------------------------------------------------- checkpoint (Phase 1)
+
+    @staticmethod
+    def _checkpoint_path(run_dir):
+        return os.path.join(run_dir, "checkpoint.json")
+
+    def _guard_hash(self):
+        """A config hash for the resume guard that is INVARIANT to the purely
+        operational fields: `resume`/`checkpoint_every`/`num_workers` (toggling
+        `resume=True` to continue must not look like a new experiment) and `steps`
+        (resume canonically extends the step budget). Everything experiment-
+        defining (gate, strategy, seeds, rollout_fanout, ...) still flips it."""
+        return replace(self._cfg, resume=False, checkpoint_every=0,
+                       num_workers=1, steps=0).config_hash()
+
+    def _save_checkpoint(self, run_dir, *, step, gate_tag, best_prog, best, pool,
+                         n_accepted, steps_run, stale, stop_stale_ctr):
+        """Single atomic JSON snapshot of the whole live campaign (NOT openEvolve's
+        one-file-per-program layout -- graphretr's pool is small/bounded so a single
+        temp+replace write is simpler and correct). RNG state is deliberately NOT
+        stored: every draw in this loop is a per-step-seeded `random.Random(seed+step)`
+        (no global stream), so resuming at the same step reproduces the same draws."""
+        blob = {
+            "version": CHECKPOINT_VERSION,
+            "config_hash": self._guard_hash(),
+            "last_step": step,            # last COMPLETED step; resume at step+1
+            "gate_tag": gate_tag,
+            "n_accepted": n_accepted,
+            "steps_run": steps_run,
+            "stale": stale,
+            "stop_stale_ctr": stop_stale_ctr,
+            "best": {"src": best_prog.src, "family": best_prog.family,
+                     "metrics": best.to_dict() if best is not None else None},
+            "pool": pool.to_dict(),
+        }
+        atomic_write_json(self._checkpoint_path(run_dir), blob, indent=1)
+
+    def _load_checkpoint(self, run_dir):
+        """Defensive reload (openEvolve's resume philosophy, none of its monolith):
+        return the blob only if it is readable, the same checkpoint version, and the
+        same resolved config_hash -- otherwise log why and start fresh rather than
+        resume into a different experiment."""
+        path = self._checkpoint_path(run_dir)
+        if not os.path.exists(path):
+            return None
+        try:
+            blob = json.load(open(path))
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[fast_loop] resume: checkpoint unreadable ({e}) -- starting fresh")
+            return None
+        if blob.get("version") != CHECKPOINT_VERSION:
+            print(f"[fast_loop] resume: checkpoint version {blob.get('version')} != "
+                  f"{CHECKPOINT_VERSION} -- starting fresh")
+            return None
+        if blob.get("config_hash") != self._guard_hash():
+            print("[fast_loop] resume: config_hash changed since checkpoint -- "
+                  "refusing to resume into a different experiment; starting fresh")
+            return None
+        return blob
+
     def run(self, substrate, seed_program, steps, campaign) -> ArmResult:
         cfg = self._cfg
         run_dir = os.path.join(cfg.runs_dir, campaign)
@@ -320,14 +385,7 @@ class FastLoop:
         meta_every = int(getattr(cfg, "meta_eval_every", 0) or 0)
         meta_idxs = list(getattr(substrate, "meta_holdout_idxs", []) or [])
         pool = CandidatePool(cap=pool_cap)
-
-        # The headline incumbent (best_prog/best_fn/best) -- still a single
-        # monotone gate-best for reporting/saving -- coexists with the pool, which
-        # only drives parent selection and the frontier-stall stop (Phase A).
-        best_prog = seed_program
-        best_fn = self._sandbox.compile(best_prog.src)
-        self._sandbox.probe(best_fn, probes, cfg.probe_timeout_s)
-        fn_cache = {best_prog.sha: best_fn}
+        fn_cache = {}
 
         def _get_fn(p):
             f = fn_cache.get(p.sha)
@@ -335,17 +393,71 @@ class FastLoop:
                 f = fn_cache[p.sha] = self._sandbox.compile(p.src)
             return f
 
-        t0 = time.time()
-        best = cache.get(_ckey(best_prog.sha))
-        if best is None:
-            best = self._reward.score(best_fn, gate_idxs, src=best_prog.src,
-                                      per_query_timeout_s=cfg.probe_timeout_s)
-            cache.put(_ckey(best_prog.sha), best)
-        pool.consider(best_prog, best)
-        print(f"[fast_loop] seed gate ({time.time()-t0:.0f}s): "
-              f"{ {k: round(best.get(k), 4) for k in QUALITY_KEYS} }"
-              + (f"  [pool ON cap={pool_cap}]" if pool_on else "  [single incumbent]"))
-        self._tracker.log_vector("best_", best, step=-1)
+        def _compiles(src):
+            try:
+                self._sandbox.compile(src)
+                return True
+            except SandboxError:
+                return False
+
+        # The headline incumbent (best_prog/best_fn/best) -- still a single
+        # monotone gate-best for reporting/saving -- coexists with the pool, which
+        # only drives parent selection and the frontier-stall stop (Phase A).
+        # Phase 1: if `resume` is set and a same-config checkpoint exists, rebuild
+        # the pool/incumbent/counters and continue at the next step instead of
+        # rebuilding the population empty and replaying.
+        start_step = 0
+        resumed = False
+        stale_resume = stop_resume = n_acc_resume = steps_run_resume = 0
+        blob = self._load_checkpoint(run_dir) if bool(getattr(cfg, "resume", False)) else None
+        if blob is not None:
+            try:
+                best_prog = SearchProgram(
+                    blob["best"]["src"],
+                    family=blob["best"].get("family", seed_program.family))
+                best_fn = self._sandbox.compile(best_prog.src)
+                fn_cache[best_prog.sha] = best_fn
+                pool = CandidatePool.from_dict(blob["pool"], validate=_compiles)
+                start_step = int(blob["last_step"]) + 1
+                stale_resume = int(blob.get("stale", 0))
+                stop_resume = int(blob.get("stop_stale_ctr", 0))
+                n_acc_resume = int(blob.get("n_accepted", 0))
+                steps_run_resume = int(blob.get("steps_run", 0))
+                # Re-establish `best` on the gate epoch we resume INTO (the stored
+                # score may be from an earlier rotating-gate epoch).
+                gate_idxs, gate_tag = _gate_for(start_step)
+                best = cache.get(_ckey(best_prog.sha))
+                if best is None:
+                    best = self._reward.score(best_fn, gate_idxs, src=best_prog.src,
+                                              per_query_timeout_s=cfg.probe_timeout_s)
+                    cache.put(_ckey(best_prog.sha), best)
+                resumed = True
+                print(f"[fast_loop] RESUMED from checkpoint at step {start_step} "
+                      f"(pool={len(pool)}, incumbent "
+                      f"recall@20={best.get('recall@20'):.4f})")
+            except (KeyError, SandboxError, TypeError) as e:
+                print(f"[fast_loop] resume: checkpoint malformed "
+                      f"({type(e).__name__}: {e}) -- starting fresh")
+                blob, resumed, start_step = None, False, 0
+                fn_cache.clear()
+                pool = CandidatePool(cap=pool_cap)
+
+        if not resumed:
+            best_prog = seed_program
+            best_fn = self._sandbox.compile(best_prog.src)
+            self._sandbox.probe(best_fn, probes, cfg.probe_timeout_s)
+            fn_cache[best_prog.sha] = best_fn
+            t0 = time.time()
+            best = cache.get(_ckey(best_prog.sha))
+            if best is None:
+                best = self._reward.score(best_fn, gate_idxs, src=best_prog.src,
+                                          per_query_timeout_s=cfg.probe_timeout_s)
+                cache.put(_ckey(best_prog.sha), best)
+            pool.consider(best_prog, best)
+            print(f"[fast_loop] seed gate ({time.time()-t0:.0f}s): "
+                  f"{ {k: round(best.get(k), 4) for k in QUALITY_KEYS} }"
+                  + (f"  [pool ON cap={pool_cap}]" if pool_on else "  [single incumbent]"))
+        self._tracker.log_vector("best_", best, step=(start_step - 1))
 
         # Plateau handling: escalate to the architect tier and stop the campaign
         # after `stop_stale` STALE steps. "stale" now means steps adding no new
@@ -356,19 +468,57 @@ class FastLoop:
         # `stale` (frontier-stall) drives ARCHITECT escalation; `stop_stale_ctr`
         # drives the STOP and resets on ANY admission, incl. sole-best specialists
         # (Phase 2 -- the two signals are no longer conflated).
-        stale = 0
-        stop_stale_ctr = 0
+        stale = stale_resume
+        stop_stale_ctr = stop_resume
 
         # --- auditability baselines (Phase B cost split, Phase C lineage) ----
         # Snapshot the budget AFTER seed scoring + embedder warmup so warmup spend
         # lands in the baseline, not in step 0's delta (cost-boundary caveat).
+        # On resume cost_prev/calls_prev re-baseline against the CURRENT budget +
+        # fresh mutator (call_counts restart at 0 in a new process), so the first
+        # post-resume step's delta is clean rather than huge-negative.
         ceiling = float(getattr(cfg, "openai_budget_usd", 0.0) or 0.0)
         cost_prev = self._budget.snapshot() if self._budget is not None else None
         calls_prev = dict(self._mutator.call_counts)
-        lineage_fh = open(os.path.join(run_dir, "lineage.jsonl"), "w")
-        n_accepted, steps_run = 0, 0
+        # On resume, APPEND to lineage.jsonl rather than truncating the prior trace.
+        lineage_fh = open(os.path.join(run_dir, "lineage.jsonl"),
+                          "a" if resumed else "w")
+        n_accepted, steps_run = n_acc_resume, steps_run_resume
 
-        for step in range(steps):
+        # --- graceful shutdown + periodic checkpoint (Phase 1) ----------------
+        checkpoint_every = int(getattr(cfg, "checkpoint_every", 0) or 0)
+        checkpoint_enabled = checkpoint_every > 0 or bool(getattr(cfg, "resume", False))
+        shutdown = {"requested": False}
+
+        def _on_signal(signum, frame):
+            # First signal: finish the current step, then stop & checkpoint.
+            # Second: hard exit (re-raised as KeyboardInterrupt). Mirrors
+            # openEvolve's "press again to force" but with the flush in `finally`.
+            if shutdown["requested"]:
+                print("\n[fast_loop] second signal -- hard exit", flush=True)
+                raise KeyboardInterrupt
+            shutdown["requested"] = True
+            print(f"\n[fast_loop] signal {signum} received -- finishing current "
+                  f"step then checkpointing (press again to force)", flush=True)
+
+        old_handlers = {}
+        for _sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                old_handlers[_sig] = signal.signal(_sig, _on_signal)
+            except (ValueError, OSError):
+                pass  # not the main thread (e.g. some runners) -- skip handlers
+
+        def _checkpoint(step):
+            if not checkpoint_enabled:
+                return
+            self._save_checkpoint(
+                run_dir, step=step, gate_tag=gate_tag, best_prog=best_prog,
+                best=best, pool=pool, n_accepted=n_accepted, steps_run=steps_run,
+                stale=stale, stop_stale_ctr=stop_stale_ctr)
+
+        last_completed = start_step - 1
+        try:
+          for step in range(start_step, steps):
             t_step = time.time()
             g_idxs, g_tag = _gate_for(step)
             if g_tag != gate_tag:
@@ -617,14 +767,35 @@ class FastLoop:
                   f"best={best.get('recall@20'):.4f}  L={L_t} {tier} "
                   f"pool={len(pool)} stale={stale} stop_stale={stop_stale_ctr}  "
                   f"({time.time()-t_step:.0f}s)")
+            last_completed = step
+            if checkpoint_every and (step + 1) % checkpoint_every == 0:
+                _checkpoint(step)
             if stop_stale and stop_stale_ctr >= stop_stale:
                 kind = "no admission (frontier or sole-best)" if pool_on else "non-accepts"
                 print(f"[fast_loop] STOPPING at step {step}: {stop_stale_ctr} consecutive "
                       f"stale steps ({kind}, >= stop_after_stale={stop_stale})", flush=True)
                 self._tracker.log_metrics({"stopped_stale_at": step}, step=step)
                 break
-
-        lineage_fh.close()
+            if shutdown["requested"]:
+                print(f"[fast_loop] STOPPING at step {step}: shutdown requested "
+                      f"-- checkpointing and finalizing", flush=True)
+                break
+        finally:
+            # flush-on-exit: close the trace and checkpoint the latest completed
+            # step on EVERY exit path (normal end, stale-stop, agent-stop, SIGINT,
+            # or an exception). openEvolve early-returns past its final checkpoint
+            # on shutdown -- its biggest data-loss hole; we invert that here.
+            lineage_fh.close()
+            try:
+                _checkpoint(last_completed)
+            except Exception as e:
+                print(f"[fast_loop] WARNING: final checkpoint failed "
+                      f"({type(e).__name__}: {e})", flush=True)
+            for _sig, _h in old_handlers.items():
+                try:
+                    signal.signal(_sig, _h)
+                except (ValueError, OSError):
+                    pass
         # run-end rollup inputs: accepted_total + usd_total feed $/accepted-edit.
         summary = {"accepted_total": n_accepted, "steps_run": steps_run,
                    "pool_size_final": len(pool)}
