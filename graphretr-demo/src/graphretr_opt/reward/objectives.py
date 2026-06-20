@@ -34,6 +34,9 @@ class MetricVector:
     latency_s: float = 0.0
     db_load: float = 0.0
     llm_calls: float = 0.0
+    rerank_items: float = 0.0             # 0.6: mean items/query sent to llm_rerank
+                                          # -- the deterministic cost meter (post-mortem
+                                          # #5). NON-gated: cost-aware EXPORT re-pick only.
     code_complexity: float = 0.0
     crashed_frac: float = 0.0
     crashed: bool = False
@@ -54,7 +57,8 @@ class MetricVector:
         a dict, not a scalar metric)."""
         out = {f"quality_{k.replace('@', '_at_')}": v for k, v in self.quality.items()}
         out.update(latency_s=self.latency_s, db_load=self.db_load,
-                   llm_calls=self.llm_calls, recall_at_100=self.recall_at_100,
+                   llm_calls=self.llm_calls, rerank_items=self.rerank_items,
+                   recall_at_100=self.recall_at_100,
                    code_complexity=self.code_complexity,
                    crashed_frac=self.crashed_frac, crashed=float(self.crashed))
         return out

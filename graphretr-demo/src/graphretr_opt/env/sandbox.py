@@ -52,6 +52,7 @@ class RunStats:
     latency_s: float
     queries: int
     llm_calls: int = 0
+    rerank_items: int = 0   # 0.6 cost meter: items the program sent to llm_rerank
 
 
 class time_limit:
@@ -178,6 +179,7 @@ class Sandbox:
         backend = getattr(self._graph, "_backend", None)
         q0 = getattr(backend, "query_count", 0)
         l0 = getattr(self._graph, "_llm_calls", 0)
+        ri0 = getattr(self._graph, "_rerank_items", 0)
         pin = getattr(self._graph, "_pin_query", None)
         if pin:
             pin(query)
@@ -194,13 +196,35 @@ class Sandbox:
         pred = validate_pred(pred)
         stats = RunStats(latency_s=time.time() - t0,
                          queries=getattr(backend, "query_count", q0) - q0,
-                         llm_calls=getattr(self._graph, "_llm_calls", l0) - l0)
+                         llm_calls=getattr(self._graph, "_llm_calls", l0) - l0,
+                         rerank_items=getattr(self._graph, "_rerank_items", ri0) - ri0)
         return pred, stats
 
-    def probe(self, fn, probe_queries, timeout_s=None):
-        """OpenEvolve probe cascade: the candidate must answer each fixed query
-        with a valid non-empty pred before it earns a full gate evaluation."""
-        last = None
+    def probe(self, fn, probe_queries, timeout_s=None, min_ok=1):
+        """Tolerant probe cascade (post-mortem #3 / Phase 0.4): run EVERY fixed
+        probe query and require at least `min_ok` of them to return a valid
+        non-empty pred. A legitimately-empty intermediate on a hard query (e.g.
+        the fixed MAPK-kinase probe `ids is empty`) is a per-query MISS, not a
+        programmer error -- the authoritative gate (evaluator.py) already scores
+        per-query and only fails a candidate when crashed_frac exceeds the limit,
+        so a strict all-must-pass probe was a redundant, stricter inconsistency
+        that hard-crashed otherwise-scorable candidates *after* paying the
+        mutator (run-7: 483K wasted tokens, 3 of 15 Opus calls, zero signal) and
+        fed crash-driven premature stops. Re-raise only when fewer than `min_ok`
+        queries succeed (a genuinely broken program). -> the last good pred (or
+        None if probe_queries is empty)."""
+        if not probe_queries:
+            return None
+        last, ok, errors = None, 0, []
         for query in probe_queries:
-            last, _ = self.run(fn, query, timeout_s)
+            try:
+                pred, _ = self.run(fn, query, timeout_s)
+                last, ok = pred, ok + 1
+            except SandboxError as e:
+                errors.append(str(e))
+        if ok < min_ok:
+            n = len(probe_queries)
+            raise SandboxError(
+                f"probe failed: only {ok}/{n} probe queries returned a valid "
+                f"pred (need >= {min_ok}); first errors: {errors[:3]}")
         return last

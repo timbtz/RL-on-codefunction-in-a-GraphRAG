@@ -30,6 +30,7 @@ class RewardModel:
         lat_sum = 0.0
         q_sum = 0
         llm_sum = 0
+        rerank_sum = 0
         for idx in idxs:
             query, q_id, answer_ids = self._sub.example(idx)
             row = {"idx": int(idx), "q_id": q_id, "query": query,
@@ -57,6 +58,7 @@ class RewardModel:
                 lat_sum += stats.latency_s
                 q_sum += stats.queries
                 llm_sum += stats.llm_calls
+                rerank_sum += stats.rerank_items
             except SandboxError as e:
                 crashed += 1
                 row["error"] = str(e)
@@ -87,6 +89,7 @@ class RewardModel:
             latency_s=lat_sum / n,
             db_load=q_sum / n,
             llm_calls=llm_sum / n,
+            rerank_items=rerank_sum / n,
             code_complexity=code_complexity(src) if src else 0.0,
             crashed_frac=crashed / n,
             recall_at_100=sum(r.get("recall@100", 0.0) for r in rows) / n,

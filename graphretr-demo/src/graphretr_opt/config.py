@@ -50,10 +50,13 @@ class Config:
     pool_cap: int = 24             # A2: max pool members (frontier + top-K)
     pool_discount: bool = True     # D3: weight parent pick by 1/(1+children)
     minibatch_size: int = 0        # B2: 0=off; else cheap pre-screen size before the full gate
+    minibatch_eps: float = 0.0     # 0.5: pre-screen tolerance; 0 => default 1/minibatch_size (post-mortem #4)
     meta_holdout_size: int = 0     # B3: 0=off; else val queries fenced off from the gate
     meta_seed: int = 1234          # B3: seeds the meta-holdout partition
     meta_eval_every: int = 0       # B3: 0=off; else score best on the holdout every N accepts
     select_holdout_n: int = 0      # Phase 1 final bake-off: 0=use full meta-holdout; else subsample to cap cost/latency
+    select_cost_floor: float = 0.0 # 0.6b: cost-aware export band; 0=pure-quality argmax. Among finalists within
+                                   # this much of the top holdout value, ship the cheapest by the rerank_items meter.
 
     # hard caps / safety walls
     query_timeout_ms: int = 2000

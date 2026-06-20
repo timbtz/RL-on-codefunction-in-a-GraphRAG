@@ -9,14 +9,23 @@ mlflow_url: http://127.0.0.1:5000
 experiment: graphretr-opt
 
 # data / gate
-gate_size: 200              # val subsample scored each step
+# Phase 0.2 (de-noise the gate; run7 post-mortem #6 Option A). The rotating
+# 200-of-1941 gate had per-epoch SE ~ 0.035 -- LARGER than real per-edit deltas
+# (0.01-0.03), so the whole accept/reject/stop trajectory was noise-driven and
+# the run-7 lift was within 1 SE of zero. Freeze + enlarge to the full pool:
+# SE -> ~0.011, and the `best=rb` re-score on rotation becomes dead code. Safe
+# because the gate stays disjoint from the fenced meta-holdout (the export
+# arbiter, Phase 0.1) and, in Stage-2, ingestion is answer-blind by construction.
+gate_size: 1941             # full gate pool (val 2241 - meta_holdout 300); was a 200-subsample
 gate_seed: 42               # seeds gate sampling AND per-step rollout rng
 gate_metric: recall@20      # axis used by 'strict' mode
 gate_mode: blend            # strict | blend | dominance  (blend = anti-overfit)
 gate_blend: "recall@20:0.4,mrr:0.3,hit@1:0.3"  # Hit@1 push: weight onto ranking axes
-gate_rotate_every: 5        # resample the gate every 5 steps so it can't be memorised
-gate_max_complexity: 0      # cap OFF (user decision): still MEASURED + a Pareto axis, just not a veto.
-                            # The cosine edit budget below is the soft substitute (curbs per-step sprawl).
+gate_rotate_every: 0        # 0 = FROZEN gate (de-noised). The meta-holdout, not rotation,
+                            # is now the anti-memorisation defense (export arbiter + overfit detector).
+gate_max_complexity: 900    # cap RE-ENABLED (post-mortem #6 Option A): vetoes sprawling memorised
+                            # programs (run1_best cc=2456) while clearing every legit strategy
+                            # (reasoning_first_v6 cc=345, ~2.6x headroom). Still a Pareto axis too.
 
 # fast loop (SkillOpt-derived)
 steps: 40                # backstop ceiling; stop_after_stale ends the run earlier on a real plateau
@@ -32,10 +41,18 @@ stop_after_stale: 8     # stop after 8 STALE steps (no new Pareto-front member; 
 pool_enabled: true      # A: instance-wise Pareto pool replaces the single incumbent
 pool_cap: 24            # A2: max pool members (frontier + top-K)
 pool_discount: true     # D3: weight parent pick by 1/(1+children) so under-explored members stay sampled
-minibatch_size: 20      # B2: cheap pre-screen size before paying the full ~200-query gate
-meta_holdout_size: 300  # B3: val queries fenced off from the gate (overfit detector, never gates)
+minibatch_size: 20      # B2: cheap pre-screen size before paying the full 1941-query gate
+                        # (MORE valuable now the full gate is ~10x costlier than the old 200-subsample).
+minibatch_eps: 0.0      # 0.5 (post-mortem #4): 0 => default 1/minibatch_size (~0.05). The pre-screen now
+                        # references the INCUMBENT best (not a sampled parent) and promotes on
+                        # value(child) >= value(best) - eps, not strict `>` -- the b=20 SE ~ 0.11 made
+                        # strict-greater false-kill 63% of candidates (19/30) in run-7.
+meta_holdout_size: 300  # B3: val queries fenced off from the gate (overfit detector + Phase 0.1 export arbiter)
 meta_seed: 1234         # B3: seeds the meta-holdout partition
 meta_eval_every: 3      # B3: score best on the holdout every 3 accepts; log gate - meta
+select_cost_floor: 0.0  # 0.6b: 0 => pure-quality export argmax (run-7 parity, keeps re-export reproducible).
+                        # >0 => among finalists within this much of the top holdout value, ship the cheapest
+                        # by the deterministic rerank_items meter. Accept gate stays pure-quality regardless.
 
 # hard caps / safety walls
 query_timeout_ms: 2000

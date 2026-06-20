@@ -67,6 +67,11 @@ class RetrievalGraph:
         self._embedder = embedder or QueryEmbedder()
         self._llm_budget = llm_budget
         self._llm_calls = 0          # extract() invocations; sandbox reads the delta
+        self._rerank_items = 0       # 0.6: deterministic per-query cost meter --
+                                     # items sent to llm_rerank (the real cost driver
+                                     # per post-mortem #5; counted cache-or-not so the
+                                     # meter is a noise-free function of program+query,
+                                     # unlike billed spend or wall-clock latency_s).
         self._pinned_query = None    # set by Sandbox.run; extract() only accepts this
         self._extract_disk = os.path.join(cfg.runs_dir, "extract_cache.json")
         self._extract_mem = None     # lazy-loaded disk cache
@@ -334,6 +339,11 @@ class RetrievalGraph:
                 pool.append(nid)
         top = self._cap(top, "top", self._cfg.max_fanout)
         self._llm_calls += 1
+        # 0.6 cost meter: charge the work the program ASKS for (pool size), before
+        # the cache lookup -- a cache hit reduces billed $ but not the program's
+        # intrinsic rerank demand, which is what we want to compare across finalists.
+        # getattr-guarded so __init__-bypass callers (tests) need not set it.
+        self._rerank_items = getattr(self, "_rerank_items", 0) + len(pool)
         if self._rerank_mem is None:
             self._rerank_mem = (json.load(open(self._rerank_disk))
                                 if os.path.exists(self._rerank_disk) else {})

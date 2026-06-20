@@ -218,37 +218,70 @@ class FastLoop:
             print("[fast_loop] final bake-off: no member scored -- keeping the "
                   "rotating-gate incumbent as best")
             return best_prog, best, []
-        # Primary key: holdout blend value (desc). Tiebreak within noise: prefer the
-        # simpler program by code_complexity (asc). NOT llm_calls -- the post-mortem
-        # found it inert in run-7 (flat ~3.1/query across all candidates), so it cannot
-        # break ties; code_complexity is a real, varying signal. NOTE: code_complexity
-        # is a top-level MetricVector ATTRIBUTE -- mv.get() only reads the quality dict
-        # (and takes one arg), so we must read it via getattr, not .get(...).
+        # `scored` is ordered by holdout blend value (desc), tiebroken on the
+        # simpler program by code_complexity (asc) -- this is the reported quality
+        # ranking + the audit order. NOT llm_calls (the post-mortem found it inert
+        # in run-7, flat ~3.1/query); code_complexity is a real, varying signal.
+        # NOTE: code_complexity / rerank_items are top-level MetricVector
+        # ATTRIBUTES -- mv.get() only reads the quality dict, so read via getattr.
         scored.sort(key=lambda t: (-t[0], getattr(t[2], "code_complexity", float("inf"))))
-        export_prog, export_mv = scored[0][1], scored[0][2]
-        self._write_select_audit(run_dir, sel_idxs, scored, export_prog, best_prog)
+        quality_top = scored[0]
+        export_prog, export_mv = self._cost_aware_pick(scored)
+        self._write_select_audit(run_dir, sel_idxs, scored, export_prog, best_prog,
+                                 quality_top[1])
         same = export_prog.sha == best_prog.sha
+        cost_repick = export_prog.sha != quality_top[1].sha
         print(f"[fast_loop] final bake-off: export {export_prog.sha[:8]} "
-              f"(holdout value={scored[0][0]:.4f}); rotating-gate headline was "
-              f"{best_prog.sha[:8]} -- "
-              + ("SAME program" if same else "DIFFERENT (the artifact was not the true best)"))
+              f"(holdout value={self._gate_value(export_mv):.4f}, "
+              f"rerank_items={getattr(export_mv, 'rerank_items', 0.0):.1f}); "
+              f"rotating-gate headline was {best_prog.sha[:8]} -- "
+              + ("SAME program" if same else "DIFFERENT (the artifact was not the true best)")
+              + (f"; cost-aware re-pick chose it over quality-top "
+                 f"{quality_top[1].sha[:8]} within floor" if cost_repick else ""))
         return export_prog, export_mv, scored
 
-    def _write_select_audit(self, run_dir, sel_idxs, scored, export_prog, gate_headline_prog):
-        """select_holdout.json: every surviving member's holdout blend value (no
-        silent pick) + which sha we exported vs the rotating-gate headline."""
+    def _cost_aware_pick(self, scored):
+        """0.6b / post-mortem #5 -- cost-aware EXPORT re-pick. `scored` is
+        [(value, prog, mv)] sorted by holdout quality (desc). Among finalists
+        within `select_cost_floor` of the top quality value, ship the CHEAPEST by
+        the deterministic `rerank_items` cost meter, tiebreaking on code_complexity
+        then quality. The accept gate stays PURE-QUALITY -- this only re-picks what
+        SHIPS, so the (noise-free but still secondary) cost axis can never corrupt
+        the search itself (the Option-2 decoupled structure the post-mortem ships).
+        `select_cost_floor`=0 (default) => the band is the exact top value, so this
+        degrades to the quality-argmax + code_complexity tiebreak (run-7 parity).
+        -> (export_prog, export_mv)."""
+        top = scored[0][0]
+        floor = float(getattr(self._cfg, "select_cost_floor", 0.0) or 0.0)
+        finalists = [t for t in scored if t[0] >= top - floor]
+        pick = min(finalists, key=lambda t: (
+            getattr(t[2], "rerank_items", 0.0),
+            getattr(t[2], "code_complexity", float("inf")),
+            -t[0]))
+        return pick[1], pick[2]
+
+    def _write_select_audit(self, run_dir, sel_idxs, scored, export_prog,
+                            gate_headline_prog, quality_top_prog=None):
+        """select_holdout.json: every surviving member's holdout blend value AND
+        rerank_items cost meter (no silent pick) + which sha we exported vs the
+        rotating-gate headline vs the pure-quality top (cost re-pick audit)."""
         members = [{
             "sha": p.sha,
             "holdout_value": round(val, 6),
             "recall@20": round(mv.get("recall@20"), 6),
             "hit@1": round(mv.get("hit@1"), 6),
             "mrr": round(mv.get("mrr"), 6),
+            "rerank_items": round(getattr(mv, "rerank_items", 0.0), 3),
             "code_complexity": round(getattr(mv, "code_complexity", 0.0), 3),
             "crashed": bool(getattr(mv, "crashed", False)),
         } for val, p, mv in scored]
         audit = {
             "select_set_size": len(sel_idxs),
+            "select_cost_floor": float(getattr(self._cfg, "select_cost_floor", 0.0) or 0.0),
             "exported_sha": export_prog.sha,
+            "quality_top_sha": (quality_top_prog or export_prog).sha,
+            "cost_repick": bool(quality_top_prog is not None
+                                and export_prog.sha != quality_top_prog.sha),
             "gate_headline_sha": gate_headline_prog.sha,
             "export_changed": export_prog.sha != gate_headline_prog.sha,
             "members": members,
@@ -411,13 +444,15 @@ class FastLoop:
                     step_metrics["probe_failed"] = 1
                     reason = f"sandbox/probe rejected: {e}"
                 else:
-                    # Phase B2: cheap minibatch pre-screen -- only pay the full gate
-                    # if the child beats its PARENT on a b-query subsample.
+                    # Phase B2 + 0.5: cheap minibatch pre-screen -- only pay the
+                    # full gate if the child clears the INCUMBENT `best` (not the
+                    # sampled parent) within tolerance on a b-query subsample.
                     if mb_size and mb_size < len(gate_idxs) and not self._minibatch_ok(
-                            cache, parent_prog, parent_fn, cand, cand_fn,
+                            cache, best_prog, best_fn, cand, cand_fn,
                             gate_idxs, gate_tag, mb_size, cfg):
                         step_metrics["minibatch_skipped"] = 1
-                        reason = f"failed minibatch pre-screen (b={mb_size}, did not beat parent)"
+                        reason = (f"failed minibatch pre-screen (b={mb_size}, did not "
+                                  f"clear incumbent within eps)")
                     else:
                         t_sc = time.time()
                         s = cache.get(_ckey(cand.sha))
@@ -601,22 +636,39 @@ class FastLoop:
         print(f"[fast_loop] done. best: { {k: round(best.get(k), 4) for k in QUALITY_KEYS} }")
         return ArmResult(best_prog.family, best_prog, best, run_dir)
 
-    def _minibatch_ok(self, cache, parent_prog, parent_fn, cand, cand_fn,
+    def _minibatch_eps(self, mb_size):
+        """Tolerance band for the pre-screen. `minibatch_eps` if set, else 1/b
+        (~0.05 at b=20) -- one query's worth of the subsample, the smallest
+        meaningful resolution on a b-query draw (post-mortem #4)."""
+        return (float(getattr(self._cfg, "minibatch_eps", 0.0) or 0.0)
+                or (1.0 / mb_size if mb_size else 0.0))
+
+    def _minibatch_ok(self, cache, best_prog, best_fn, cand, cand_fn,
                       gate_idxs, gate_tag, mb_size, cfg):
-        """Phase B2: score parent and child on a fixed b-query subsample of the
-        gate; promote to the full gate only if the child's gate-value strictly
-        beats the parent's. Parent minibatch scores are cached per (sha, epoch).
+        """Phase 0.5 / post-mortem #4: cheap b-query pre-screen before paying the
+        full gate. Two fixes over the run-7 screen, which false-killed 63% of
+        candidates (19/30):
+          1. Reference the monotone INCUMBENT `best` -- the same bar the full gate
+             uses -- NOT a randomly-sampled pool parent (a specialist parent is a
+             stricter, stochastic bar than the gate ever applies).
+          2. Promote on `value(child) >= value(best) - eps`, NOT strict `>`: a
+             20-query subsample has SE ~ 0.11, so strict-greater false-kills exact
+             ties and primary-axis-positive children that the deciding gate would
+             have accepted.
+        Leakage-free: mb_idxs is a subset of the gate set, and a pass only sends
+        MORE candidates to the strict full gate (which stays authoritative).
+        Incumbent + child minibatch scores are cached per (sha, epoch).
         -> True if the child should proceed to the full gate."""
         # deterministic per-epoch subsample (no hash() -- that is process-salted)
         tag_seed = cfg.gate_seed * 13 + sum(ord(c) for c in gate_tag)
         mb_idxs = sorted(random.Random(tag_seed).sample(list(gate_idxs), mb_size))
-        pk = f"mb:{parent_prog.sha}@{gate_tag}"
-        p_mb = cache.get(pk)
-        if p_mb is None:
-            p_mb = self._reward.score(parent_fn, mb_idxs, src=parent_prog.src,
+        bk = f"mb:{best_prog.sha}@{gate_tag}"
+        b_mb = cache.get(bk)
+        if b_mb is None:
+            b_mb = self._reward.score(best_fn, mb_idxs, src=best_prog.src,
                                       per_query_timeout_s=cfg.probe_timeout_s)
-            cache.put(pk, p_mb)
+            cache.put(bk, b_mb)
         c_mb = self._reward.score(cand_fn, mb_idxs, src=cand.src,
                                   per_query_timeout_s=cfg.probe_timeout_s)
         cache.put(f"mb:{cand.sha}@{gate_tag}", c_mb)
-        return self._gate_value(c_mb) > self._gate_value(p_mb)
+        return self._gate_value(c_mb) >= self._gate_value(b_mb) - self._minibatch_eps(mb_size)
