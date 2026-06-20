@@ -21,7 +21,6 @@ from .env.retrieval_graph import RetrievalGraph
 from .env.sandbox import Sandbox, SandboxError, SAFE_BUILTINS
 from .reward.evaluator import RewardModel
 from .reward.objectives import QUALITY_KEYS
-from .reward.pareto import ParetoArchive
 from .artifact.program import SearchProgram
 from .agents.single import SingleCoder
 from .agents.team import TieredCoder
@@ -55,7 +54,6 @@ class Campaign:
         self.substrate = Substrate(meta_holdout_size=cfg.meta_holdout_size,
                                    meta_seed=cfg.meta_seed)
         self.reward = RewardModel(self.substrate, self.sandbox, cfg.crash_frac_limit)
-        self.archive = ParetoArchive()
         return self
 
     def _make_mutator(self):
@@ -97,7 +95,7 @@ class Campaign:
             tracker.set_tags({"approach": campaign, "strategy": cfg.strategy,
                               "config_hash": cfg_hash})
             loop = FastLoop(cfg, self.graph, self.sandbox, self.reward, mutator,
-                            edit_budget, tracker, self.archive, budget=self.budget)
+                            edit_budget, tracker, budget=self.budget)
             result = loop.run(self.substrate, seed, steps, campaign)
             tracker.log_artifacts(run_dir)
         print(f"[campaign] best program -> {os.path.join(run_dir, 'best_search.py')}")
@@ -134,12 +132,12 @@ class Campaign:
             _, rows = self.reward.score(seed_fn, ridxs, src=seed.src, return_rows=True,
                                         per_query_timeout_s=cfg.probe_timeout_s)
             loop = FastLoop(cfg, self.graph, self.sandbox, self.reward, mutator,
-                            EditBudget("const", cfg.max_edits), tracker, self.archive)
+                            EditBudget("const", cfg.max_edits), tracker)
             fails, wins = loop._reflect(rows, cfg.reflect_top)
 
             print(f"[stage0] one-shot rewrite ({cfg.mutator_backend}/{cfg.mutator_model}) ...")
             t0 = time.time()
-            cand, transcript = mutator.propose(seed, fails, wins, [], cfg.max_edits)
+            cand, transcript, _ = mutator.propose(seed, fails, wins, [], cfg.max_edits)
             tracker.log_metrics({"llm_seconds": time.time() - t0})
             open(os.path.join(run_dir, "reflection_oneshot.md"), "w").write(transcript)
 

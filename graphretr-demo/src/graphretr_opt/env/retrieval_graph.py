@@ -57,6 +57,25 @@ synonyms or the connecting concept the first pass missed. Do NOT invent facts
 not implied by the question or the context. Return ONLY a JSON object
 {"query": "<the rewritten query, one line>"}."""
 
+_JUDGE_SYSTEM = """\
+You are a sufficiency judge for a biomedical knowledge-graph search. Given one
+question and a numbered list of the top retrieved candidate nodes (name + type +
+details), decide whether these candidates already CONTAIN the entity the
+question asks for. If they do, answer sufficient=true with an empty missing
+list. If they do NOT, answer sufficient=false and list what is MISSING -- the
+concepts, entities or relations the correct answer needs that are absent from
+the candidates, each phrased as a short search hint (no question words). Return
+ONLY a JSON object {"sufficient": <true|false>, "missing": ["<hint>", ...]}."""
+
+_FRONTIER_SYSTEM = """\
+You choose which retrieved nodes to EXPAND next in a biomedical knowledge-graph
+search. Given one question and a numbered list of candidate nodes (name + type +
+details), return the indices of the candidates whose graph NEIGHBORS are most
+likely to contain or lead to the answer -- the doors worth opening for the next
+hop. Prefer well-connected anchor entities related to the question over exact
+matches that look like dead ends. Return ONLY a JSON object
+{"expand": [<index>, ...]} (indices from the list, most promising first)."""
+
 
 class RetrievalGraph:
     def __init__(self, cfg, backend, cache: PrimitiveCache = None,
@@ -79,6 +98,10 @@ class RetrievalGraph:
         self._rerank_mem = None      # lazy-loaded disk cache
         self._reformulate_disk = os.path.join(cfg.runs_dir, "reformulate_cache.json")
         self._reformulate_mem = None  # lazy-loaded disk cache
+        self._judge_disk = os.path.join(cfg.runs_dir, "judge_sufficient_cache.json")
+        self._judge_mem = None        # lazy-loaded disk cache
+        self._frontier_disk = os.path.join(cfg.runs_dir, "pick_frontier_cache.json")
+        self._frontier_mem = None     # lazy-loaded disk cache
 
         # One-time engine safety config (global to our container alone).
         backend.configure("TIMEOUT_MAX", 10_000)
@@ -368,15 +391,20 @@ class RetrievalGraph:
         ranked = sorted(scores.items(), key=lambda t: t[1], reverse=True)
         return [(int(i), s) for i, s in ranked[:top]]
 
-    def reformulate(self, context_ids, top=10):
+    def reformulate(self, context_ids, top=10, missing=None):
         """Rewrite the current query from the documents of the top retrieved
         nodes when the first pass looks weak (fixed prompt, fixed schema). Reads
         the CURRENT query q (the sandbox pins it -- a program cannot reformulate
         arbitrary text), plus up to `reformulate_ctx_max` of the given context
-        node docs. -> a new query string the program can re-embed (falls back to
-        the original q if the model returns nothing usable). Metered + costed +
-        cached on disk by (q, context pool) exactly like extract()/llm_rerank()
-        -- repeat (q, pool) pairs are free and resume-safe."""
+        node docs. Pass `missing` (e.g. judge_sufficient()'s list of absent
+        concepts) to STEER the rewrite at what the first hop lacked -- it is
+        added to the prompt AND folded into the cache key, so the same (q, pool)
+        with a different `missing` is a distinct billed call. -> a new query
+        string the program can re-embed (falls back to the original q if the
+        model returns nothing usable). Metered + costed + cached on disk by
+        (q, context pool[, missing]) exactly like extract()/llm_rerank() --
+        repeat calls are free and resume-safe. missing=None is byte-identical to
+        the pre-Item-2 cache entries."""
         q = self._pinned_query
         if not q:
             raise ValueError("reformulate() accepts only the current query q "
@@ -392,18 +420,25 @@ class RetrievalGraph:
             if nid not in seen and len(pool) < cap:
                 seen.add(nid)
                 pool.append(nid)
+        miss = [s.strip() for s in (missing or [])
+                if isinstance(s, str) and s.strip()][:6]
         self._llm_calls += 1
         if self._reformulate_mem is None:
             self._reformulate_mem = (json.load(open(self._reformulate_disk))
                                      if os.path.exists(self._reformulate_disk) else {})
+        # missing-less calls keep the exact pre-Item-2 key (no trailing field).
         ckey = q + "\x00" + ",".join(str(i) for i in sorted(pool))
+        if miss:
+            ckey += "\x00" + "|".join(miss)
         new_q = self._reformulate_mem.get(ckey)
         if new_q is None:
             texts = self.get_text(pool, limit=len(pool)) if pool else {}
             lines = "\n".join(f"- {texts.get(nid, '')[:300]}" for nid in pool)
+            miss_line = (f"\n\nThe first retrieval is MISSING: {', '.join(miss)}"
+                         if miss else "")
             raw = self._llm_budget.chat_json(
                 _REFORMULATE_SYSTEM,
-                f"Original question: {q}\n\nTop retrieved context:\n{lines}",
+                f"Original question: {q}\n\nTop retrieved context:\n{lines}{miss_line}",
                 model=self._cfg.reformulate_model, max_tokens=120)
             cand = raw.get("query") if isinstance(raw, dict) else None
             new_q = cand.strip() if isinstance(cand, str) and cand.strip() else q
@@ -412,6 +447,111 @@ class RetrievalGraph:
             os.makedirs(os.path.dirname(self._reformulate_disk), exist_ok=True)
             json.dump(self._reformulate_mem, open(self._reformulate_disk, "w"))
         return new_q
+
+    def judge_sufficient(self, query, ids, top=20):
+        """LLM sufficiency judge (fixed prompt, fixed schema). Accepts ONLY the
+        current query q (the sandbox pins it). Given the top retrieved nodes,
+        returns {'sufficient': bool, 'missing': [str]} where 'missing' is a short
+        list of free-text search HINTS for what the answer still needs (NOT
+        allowlist-bound -- they feed reformulate(missing=...)/vector_search as
+        text, like reformulate's rewritten query). Reads up to `judge_ctx_max`
+        candidate docs. Metered + costed (on the rerank_items meter) + disk-
+        cached by (q, pool) exactly like llm_rerank()/reformulate() -- repeat
+        (q, pool) pairs are free and resume-safe. Use it to DECIDE whether to
+        keep hopping instead of guessing from raw scores."""
+        P.nonempty_str(query, "query")
+        if query != self._pinned_query:
+            raise ValueError("judge_sufficient() accepts only the current query q")
+        if self._llm_budget is None:
+            raise ValueError("judge_sufficient() is not enabled (no OPENAI_API_KEY)")
+        cap = min(self._cap(top, "top", self._cfg.max_fanout),
+                  self._cfg.judge_ctx_max)
+        seen, pool = set(), []
+        for nid in P.ids_in(ids):
+            if nid not in seen and len(pool) < cap:
+                seen.add(nid)
+                pool.append(nid)
+        self._llm_calls += 1
+        # Charge the intrinsic LLM demand on the deterministic cost meter (before
+        # the cache lookup) so a multi-hop program registers on the cost axis the
+        # export re-pick reads -- mirrors llm_rerank().
+        self._rerank_items = getattr(self, "_rerank_items", 0) + len(pool)
+        if self._judge_mem is None:
+            self._judge_mem = (json.load(open(self._judge_disk))
+                               if os.path.exists(self._judge_disk) else {})
+        ckey = query + "\x00" + ",".join(str(i) for i in sorted(pool))
+        hit = self._judge_mem.get(ckey)
+        if hit is None:
+            texts = self.get_text(pool, limit=len(pool)) if pool else {}
+            lines = "\n".join(f"[{i}] {texts.get(nid, '')[:300]}"
+                              for i, nid in enumerate(pool))
+            raw = self._llm_budget.chat_json(
+                _JUDGE_SYSTEM, f"Question: {query}\n\nCandidates:\n{lines}",
+                model=self._cfg.judge_model, max_tokens=200)
+            hit = self._validate_judge(raw)
+            self._judge_mem[ckey] = hit
+            os.makedirs(os.path.dirname(self._judge_disk), exist_ok=True)
+            json.dump(self._judge_mem, open(self._judge_disk, "w"))
+        return json.loads(json.dumps(hit))  # defensive copy
+
+    def _validate_judge(self, raw):
+        raw = raw if isinstance(raw, dict) else {}
+        missing = raw.get("missing")
+        missing = missing if isinstance(missing, list) else []
+        return {
+            "sufficient": bool(raw.get("sufficient")),
+            "missing": [s.strip()[:80] for s in missing
+                        if isinstance(s, str) and s.strip()][:6],
+        }
+
+    def pick_frontier(self, query, ids, top=8):
+        """LLM frontier picker (fixed prompt, fixed schema). Accepts ONLY the
+        current query q. Given the candidate nodes, returns the SUBSET of node
+        ids whose neighbors most likely contain or lead to the answer -- the
+        seeds to k_hop_expand()/get_neighbors() for the next hop. The model
+        returns indices into the candidate list; they are mapped back to node
+        ids, deduped and capped at `top`. Reads up to `frontier_ctx_max`
+        candidate docs. Metered + costed (rerank_items meter) + disk-cached by
+        (q, pool); the RESOLVED ids are cached (not the indices), so a cache hit
+        with the same pool in any order is correct and free."""
+        P.nonempty_str(query, "query")
+        if query != self._pinned_query:
+            raise ValueError("pick_frontier() accepts only the current query q")
+        if self._llm_budget is None:
+            raise ValueError("pick_frontier() is not enabled (no OPENAI_API_KEY)")
+        top = self._cap(top, "top", self._cfg.max_fanout)
+        seen, pool = set(), []
+        for nid in P.ids_in(ids):
+            if nid not in seen and len(pool) < self._cfg.frontier_ctx_max:
+                seen.add(nid)
+                pool.append(nid)
+        self._llm_calls += 1
+        self._rerank_items = getattr(self, "_rerank_items", 0) + len(pool)
+        if self._frontier_mem is None:
+            self._frontier_mem = (json.load(open(self._frontier_disk))
+                                  if os.path.exists(self._frontier_disk) else {})
+        ckey = query + "\x00" + ",".join(str(i) for i in sorted(pool))
+        chosen = self._frontier_mem.get(ckey)
+        if chosen is None:
+            texts = self.get_text(pool, limit=len(pool)) if pool else {}
+            lines = "\n".join(f"[{i}] {texts.get(nid, '')[:300]}"
+                              for i, nid in enumerate(pool))
+            raw = self._llm_budget.chat_json(
+                _FRONTIER_SYSTEM, f"Question: {query}\n\nCandidates:\n{lines}",
+                model=self._cfg.frontier_model, max_tokens=120)
+            exp = raw.get("expand") if isinstance(raw, dict) else None
+            exp = exp if isinstance(exp, list) else []
+            chosen, picked = [], set()
+            for v in exp:
+                if isinstance(v, bool) or not isinstance(v, int):
+                    continue
+                if 0 <= v < len(pool) and pool[v] not in picked:
+                    picked.add(pool[v])
+                    chosen.append(pool[v])  # store resolved ids (order-independent)
+            self._frontier_mem[ckey] = chosen
+            os.makedirs(os.path.dirname(self._frontier_disk), exist_ok=True)
+            json.dump(self._frontier_mem, open(self._frontier_disk, "w"))
+        return [int(nid) for nid in chosen][:top]
 
     def get_text(self, ids, limit=50):
         """Fetch node documents. -> {node_id: text}, at most `limit` entries."""
@@ -493,18 +633,40 @@ G.llm_rerank(q, ids, top=20) -> list[(node_id, score)]
     reasoning, so it can rank a text-dissimilar correct answer above a wordy
     decoy -- but each unique (q, pool) costs one billed LLM call, so rerank a
     small dense top-k, not the whole graph.
-G.reformulate(context_ids, top=10) -> str
+G.reformulate(context_ids, top=10, missing=None) -> str
     Rewrite the query q from the docs of its top retrieved nodes when the first
     retrieval looks weak (gold likely NOT generated -- e.g. first rerank score
     low, or recall@20 short of recall@100). Returns a NEW query string to
     re-embed with vector_search/text_search, then merge the fresh pool. Operates
     on the current q only (you cannot reformulate arbitrary text); reads up to
     {cfg.reformulate_ctx_max} context docs; one billed LLM call per unique
-    (q, pool), cached. Use it to attack RECALL (generation), not ranking; a
-    wasted call is penalized by the metered llm_calls cost axis, so only
-    reformulate when the first hop is weak.
+    (q, pool[, missing]), cached. Pass missing=judge_sufficient(...)['missing']
+    to STEER the rewrite at exactly what the first hop lacked. Use it to attack
+    RECALL (generation), not ranking; a wasted call is penalized by the metered
+    llm_calls cost axis, so only reformulate when the first hop is weak.
+G.judge_sufficient(q, ids, top=20) -> dict
+    LLM sufficiency judge over the top retrieved candidates (accepts ONLY the
+    exact `q`; reads up to {cfg.judge_ctx_max} docs; cached by (q, pool)).
+    Returns {{'sufficient': bool, 'missing': [str]}} -- 'missing' is free-text
+    search hints (concepts/entities/relations the answer needs that are absent).
+    Use it to DECIDE whether the pool already holds the answer or you must hop
+    again; feed 'missing' straight into reformulate(missing=...).
+G.pick_frontier(q, ids, top=8) -> list[node_id]
+    LLM frontier picker (accepts ONLY the exact `q`; reads up to
+    {cfg.frontier_ctx_max} docs; cached by (q, pool)). Returns the SUBSET of the
+    given ids whose graph neighbors most likely contain or lead to the answer --
+    the seeds to k_hop_expand()/get_neighbors() for the next hop. Lets you open
+    only the promising doors instead of expanding every candidate.
 G.get_text(ids, limit=50) -> dict[node_id, str]
     Node documents (name + type + details), for inspection/filtering.
+
+Bounded multi-hop loop (the recall lever -- discover it the way run-5 found
+llm_rerank): retrieve a dense top-k -> judge_sufficient(q, ids); if NOT
+sufficient, reformulate(context_ids, missing=judge['missing']) and re-retrieve
+the fresh query, then pick_frontier(q, ids) and k_hop_expand/get_neighbors the
+chosen seeds to grow the pool -> llm_rerank the merged pool -> repeat while
+insufficient, depth <= {cfg.max_k}. judge/frontier/reformulate are each one
+cached, metered LLM call, so loop only while the hop is paying off.
 
 Allowlists (use these EXACT strings):
   label / node-type labels: {list(self._allow.labels)}

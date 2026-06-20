@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from ..agents.single import AgentUnavailable
 from ..artifact.program import SearchProgram
 from ..env.openai_client import BudgetExceeded, step_cost_delta
-from ..env.sandbox import SandboxError
 from ..reward.objectives import QUALITY_KEYS
 from .gate import Gate
 from .pool import CandidatePool
@@ -50,7 +49,7 @@ class _ScoreCache:
 
 class FastLoop:
     def __init__(self, cfg, graph, sandbox, reward, mutator, edit_budget,
-                 tracker, archive, budget=None):
+                 tracker, budget=None):
         self._cfg = cfg
         self._graph = graph
         self._sandbox = sandbox
@@ -58,7 +57,6 @@ class FastLoop:
         self._mutator = mutator
         self._edit_budget = edit_budget
         self._tracker = tracker
-        self._archive = archive
         self._budget = budget  # OpenAIBudget (or None); per-step cost attribution
         blend = {}
         for part in str(getattr(cfg, "gate_blend", "") or "").split(","):
@@ -343,7 +341,6 @@ class FastLoop:
             best = self._reward.score(best_fn, gate_idxs, src=best_prog.src,
                                       per_query_timeout_s=cfg.probe_timeout_s)
             cache.put(_ckey(best_prog.sha), best)
-        self._archive.add(best_prog.sha, best_prog.family, best)
         pool.consider(best_prog, best)
         print(f"[fast_loop] seed gate ({time.time()-t0:.0f}s): "
               f"{ {k: round(best.get(k), 4) for k in QUALITY_KEYS} }"
@@ -410,9 +407,23 @@ class FastLoop:
             L_t = self._edit_budget.L_t(step)
             plateau = bool(arch_plateau and stale >= arch_plateau)
             t_llm = time.time()
+
+            def _validate(cand):
+                # Compile + probe INSIDE propose so a probe failure can be
+                # self-repaired in-conversation (repair_budget>0) instead of
+                # costing a whole reject-and-repropose next step. Raises
+                # SandboxError on reject; on success the validated fn is handed
+                # forward so the gate path skips a redundant recompile.
+                fn = self._sandbox.compile(cand.src)
+                self._sandbox.probe(fn, probes, cfg.probe_timeout_s)
+                fn_cache[cand.sha] = fn
+                return fn
+
             try:
-                cand, transcript = self._mutator.propose(
-                    parent_prog, fails, wins, buffer.recent(), L_t, plateau=plateau)
+                cand, transcript, meta = self._mutator.propose(
+                    parent_prog, fails, wins, buffer.recent(), L_t,
+                    plateau=plateau, validate=_validate,
+                    repair_budget=int(getattr(cfg, "repair_budget", 0) or 0))
             except AgentUnavailable as e:
                 # CLI limits reached: stop the campaign here, keep the incumbent
                 # as best, and fall through to the normal save-and-return path so
@@ -434,55 +445,62 @@ class FastLoop:
                             "edit_budget": L_t}
             reason, s = "", None
             admitted, frontier_grew = False, False
+            # probe_failed is now a COUNT from propose: how many times a parsed,
+            # in-budget candidate failed the sandbox/probe this step (>=1 when
+            # self-repair was exercised, whether or not it ultimately succeeded).
+            step_metrics["probe_failed"] = int(meta.get("probe_failed", 0))
             if cand is None:
-                reason = "mutator returned no usable candidate (budget/parse/agent failure)"
-            else:
-                try:
-                    cand_fn = self._sandbox.compile(cand.src)
-                    self._sandbox.probe(cand_fn, probes, cfg.probe_timeout_s)
-                except SandboxError as e:
-                    step_metrics["probe_failed"] = 1
-                    reason = f"sandbox/probe rejected: {e}"
+                rr = meta.get("reject_reason")
+                if rr == "sandbox":
+                    reason = (f"sandbox/probe rejected (repair budget exhausted "
+                              f"after {meta.get('probe_failed', 0)} probe failure(s))")
+                elif rr == "budget":
+                    reason = "mutator returned no in-budget candidate after 2 attempts"
+                elif rr == "agent":
+                    reason = "mutator returned no candidate (transient agent failure)"
                 else:
-                    # Phase B2 + 0.5: cheap minibatch pre-screen -- only pay the
-                    # full gate if the child clears the INCUMBENT `best` (not the
-                    # sampled parent) within tolerance on a b-query subsample.
-                    if mb_size and mb_size < len(gate_idxs) and not self._minibatch_ok(
-                            cache, best_prog, best_fn, cand, cand_fn,
-                            gate_idxs, gate_tag, mb_size, cfg):
-                        step_metrics["minibatch_skipped"] = 1
-                        reason = (f"failed minibatch pre-screen (b={mb_size}, did not "
-                                  f"clear incumbent within eps)")
+                    reason = "mutator returned no usable candidate (parse failure)"
+            else:
+                # `cand` already compiled + probed inside propose (the _validate
+                # closure populated fn_cache), so no recompile/reprobe here.
+                cand_fn = fn_cache[cand.sha]
+                # Phase B2 + 0.5: cheap minibatch pre-screen -- only pay the
+                # full gate if the child clears the INCUMBENT `best` (not the
+                # sampled parent) within tolerance on a b-query subsample.
+                if mb_size and mb_size < len(gate_idxs) and not self._minibatch_ok(
+                        cache, best_prog, best_fn, cand, cand_fn,
+                        gate_idxs, gate_tag, mb_size, cfg):
+                    step_metrics["minibatch_skipped"] = 1
+                    reason = (f"failed minibatch pre-screen (b={mb_size}, did not "
+                              f"clear incumbent within eps)")
+                else:
+                    t_sc = time.time()
+                    s = cache.get(_ckey(cand.sha))
+                    if s is not None:
+                        step_metrics["gate_cache_hit"] = 1
                     else:
-                        t_sc = time.time()
-                        s = cache.get(_ckey(cand.sha))
-                        if s is not None:
-                            step_metrics["gate_cache_hit"] = 1
-                        else:
-                            s = self._reward.score(cand_fn, gate_idxs, src=cand.src,
-                                                   per_query_timeout_s=cfg.probe_timeout_s)
-                            cache.put(_ckey(cand.sha), s)
-                        step_metrics["score_seconds"] = time.time() - t_sc
-                        self._tracker.log_vector("val_", s, step=step)
-                        self._archive.add(cand.sha, cand.family, s)
-                        fn_cache[cand.sha] = cand_fn
-                        frontier_grew, admitted = pool.consider(cand, s)
-                        # headline gate (blend) -- updates the monotone reported best.
-                        if self._gate.accept(s, best):
-                            best_prog, best_fn, best = cand, cand_fn, s
-                            cand.save(os.path.join(acc_dir, f"step_{step:03d}.py"))
-                        cap = self._gate.max_complexity
-                        if s.crashed:
-                            reason = "crashed on gate"
-                        elif cap and s.code_complexity > cap:
-                            reason = (f"complexity cap exceeded "
-                                      f"({s.code_complexity:.0f} > {cap:.0f}) -- simplify")
-                        elif admitted:
-                            reason = ("admitted to pool ("
-                                      + ("new Pareto frontier" if frontier_grew
-                                         else "sole-best on >=1 query") + ")")
-                        else:
-                            reason = f"not admitted (dominated, no sole-best query; gate {self._gate.mode})"
+                        s = self._reward.score(cand_fn, gate_idxs, src=cand.src,
+                                               per_query_timeout_s=cfg.probe_timeout_s)
+                        cache.put(_ckey(cand.sha), s)
+                    step_metrics["score_seconds"] = time.time() - t_sc
+                    self._tracker.log_vector("val_", s, step=step)
+                    frontier_grew, admitted = pool.consider(cand, s)
+                    # headline gate (blend) -- updates the monotone reported best.
+                    if self._gate.accept(s, best):
+                        best_prog, best_fn, best = cand, cand_fn, s
+                        cand.save(os.path.join(acc_dir, f"step_{step:03d}.py"))
+                    cap = self._gate.max_complexity
+                    if s.crashed:
+                        reason = "crashed on gate"
+                    elif cap and s.code_complexity > cap:
+                        reason = (f"complexity cap exceeded "
+                                  f"({s.code_complexity:.0f} > {cap:.0f}) -- simplify")
+                    elif admitted:
+                        reason = ("admitted to pool ("
+                                  + ("new Pareto frontier" if frontier_grew
+                                     else "sole-best on >=1 query") + ")")
+                    else:
+                        reason = f"not admitted (dominated, no sole-best query; gate {self._gate.mode})"
 
             # "accepted" = useful edit: pool admission when the pool drives the
             # search, else a headline gate improvement (run-5 parity).

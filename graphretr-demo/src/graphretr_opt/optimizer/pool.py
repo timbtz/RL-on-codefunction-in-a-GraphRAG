@@ -1,7 +1,7 @@
 """CandidatePool -- the instance-wise Pareto pool that replaces run-5's single
-incumbent (Phase A, GEPA Alg. 2). The dormant `ParetoArchive` kept only the
-aggregate frontier as a passive record; this pool actively drives parent
-SELECTION and the stop condition.
+incumbent (Phase A, GEPA Alg. 2). The old `ParetoArchive` kept only the
+aggregate frontier as a passive record (never read, since removed); this pool
+actively drives parent SELECTION and the stop condition.
 
 A child is ADMITTED to the pool if it is either
   * non-dominated on the aggregate metric vector (a Pareto-frontier point), OR

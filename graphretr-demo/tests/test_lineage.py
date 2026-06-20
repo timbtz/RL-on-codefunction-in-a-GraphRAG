@@ -66,9 +66,14 @@ class _FakeMutator:
     def __init__(self):
         self._n = 0
 
-    def propose(self, prog, fails, wins, recent, L_t, plateau=False):
+    def propose(self, prog, fails, wins, recent, L_t, plateau=False,
+                validate=None, repair_budget=0):
         self._n += 1
-        return prog.with_src(prog.src + f"\n# edit {self._n}"), f"transcript {self._n}"
+        cand = prog.with_src(prog.src + f"\n# edit {self._n}")
+        if validate is not None:
+            validate(cand)  # mirror real propose: compile+probe, populate fn_cache
+        return cand, f"transcript {self._n}", {"reject_reason": None,
+                                               "probe_failed": 0}
 
     @property
     def call_counts(self):
@@ -89,11 +94,6 @@ class _FakeTracker:
         yield None
 
     def record_step(self, span, outputs=None, attributes=None):
-        pass
-
-
-class _FakeArchive:
-    def add(self, *a, **k):
         pass
 
 
@@ -119,7 +119,7 @@ def test_lineage_chain():
         seed = SearchProgram(SEED_SRC, family="test")
         loop = FastLoop(cfg, _FakeGraph(), _FakeSandbox(), _FakeReward(),
                         _FakeMutator(), EditBudget("const", 2, 1, steps),
-                        _FakeTracker(), _FakeArchive(), budget=None)
+                        _FakeTracker(), budget=None)
         loop.run(_FakeSubstrate(), seed, steps, "lineage_test")
 
         path = os.path.join(d, "runs", "lineage_test", "lineage.jsonl")
@@ -160,7 +160,8 @@ def test_lineage_records_rejects():
 
     class _NoCandMutator:
         def propose(self, *a, **k):
-            return None, "no candidate"
+            return None, "no candidate", {"reject_reason": "parse",
+                                          "probe_failed": 0}
 
         @property
         def call_counts(self):
@@ -173,7 +174,7 @@ def test_lineage_records_rejects():
         seed = SearchProgram(SEED_SRC, family="test")
         loop = FastLoop(cfg, _FakeGraph(), _FakeSandbox(), _FakeReward(),
                         _NoCandMutator(), EditBudget("const", 2, 1, steps),
-                        _FakeTracker(), _FakeArchive(), budget=None)
+                        _FakeTracker(), budget=None)
         loop.run(_FakeSubstrate(), seed, steps, "lineage_reject")
 
         path = os.path.join(d, "runs", "lineage_reject", "lineage.jsonl")

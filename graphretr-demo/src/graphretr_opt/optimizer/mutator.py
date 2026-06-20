@@ -11,13 +11,25 @@ Two-phase, but agent-agnostic:
 Because both steps go through the same complete()/digest() seam, the
 single-vs-tiered ablation never touches this file.
 
-propose() returns (candidate SearchProgram or None, transcript). None means the
-step is skipped (budget blown twice, unparseable reply, transient agent
-failure). AgentUnavailable (hard CLI/spend limit) propagates so the loop can
-stop the campaign instead of burning the remaining steps.
+propose() returns (candidate SearchProgram or None, transcript, meta). None
+means the step is skipped (budget blown, unparseable reply, transient agent
+failure, or -- with repair on -- a candidate the sandbox/probe kept rejecting).
+`meta` carries the reject reason and the probe-failed count so the loop can set
+its step `reason` precisely. AgentUnavailable (hard CLI/spend limit) propagates
+so the loop can stop the campaign instead of burning the remaining steps.
+
+Compiler-in-the-loop self-repair (KernelEvolve read/replace/lint): when the
+caller supplies a `validate(cand)` closure (it compiles + probes, raising
+SandboxError on reject) and a `repair_budget > 0`, a candidate that parses and
+fits the edit budget but FAILS validation is fed its exact sandbox/probe error
+back into the SAME conversation for a targeted fix -- cheaper than today's
+reject-and-repropose-next-step because it reuses the already-computed
+digest + prompt. Default `repair_budget=0` => validation never runs and the old
+behavior (caller compiles/probes after propose returns) is byte-identical.
 """
 from ..agents.single import AgentUnavailable
 from ..artifact.program import SearchProgram
+from ..env.sandbox import SandboxError
 from .edits import EditError, apply_edits, extract_code, parse_edit_blocks
 
 
@@ -151,10 +163,29 @@ class Mutator:
         return cand, program.edit_distance(cand)
 
     def propose(self, program: SearchProgram, failures, wins, buffer_entries,
-                edit_budget, plateau=False):
-        """-> (candidate SearchProgram or None, transcript:str)."""
+                edit_budget, plateau=False, validate=None, repair_budget=0):
+        """Propose an edit to `program` from the rollout evidence.
+
+        -> (candidate SearchProgram or None, transcript:str, meta:dict) where
+        meta = {"reject_reason": "parse"|"budget"|"sandbox"|"agent"|None,
+                "probe_failed": int}. reject_reason is None on success.
+
+        Two independent retry pools share the one conversation:
+          * parse/budget retries consume the 2 BASE attempts (a reply with no
+            usable block, or one over the edit budget);
+          * sandbox/probe retries consume `repair_budget` -- only reached when
+            `validate(cand)` is supplied. validate compiles + probes the
+            candidate and raises SandboxError on reject; its exact text is fed
+            back for a targeted fix (compiler-in-the-loop self-repair).
+        With validate=None / repair_budget=0 the validation arm never runs."""
         evidence = format_evidence(failures, wins, buffer_entries)
         transcript = [f"# EVIDENCE\n\n{evidence}"]
+        meta = {"reject_reason": None, "probe_failed": 0}
+
+        def _done(cand, reason):
+            meta["reject_reason"] = reason
+            return cand, "\n\n---\n\n".join(transcript), meta
+
         try:
             digest = self._agent.digest(evidence)
         except AgentUnavailable:
@@ -169,26 +200,59 @@ class Mutator:
                               self._safe_builtins)
         transcript.append(f"# PROMPT\n\n{prompt}")
         tier = "architect" if plateau else "editor"
-        for attempt in (1, 2):
+        base_left = 2                       # parse + over-budget retries
+        repairs_left = max(0, int(repair_budget))  # sandbox/probe repairs
+        attempt = 0
+        while True:
+            attempt += 1
             try:
                 resp = self._agent.complete(prompt, tier=tier)
             except AgentUnavailable:
                 raise
             except Exception as e:
                 transcript.append(f"# AGENT CALL FAILED (attempt {attempt})\n\n{e}")
-                return None, "\n\n---\n\n".join(transcript)
+                return _done(None, "agent")
             transcript.append(f"# RESPONSE ({tier}, attempt {attempt})\n\n{resp}")
 
             cand, n_edits = self._candidate(program, resp)
             if cand is None:
+                base_left -= 1
+                if base_left <= 0:
+                    transcript.append("# SKIPPED: no usable candidate after "
+                                      "2 base attempts")
+                    return _done(None, "parse")
                 prompt += ("\n\nYour previous reply contained neither a usable "
                            "SEARCH/REPLACE block (the SEARCH text must match the "
                            "incumbent exactly) nor a ```python module. Reply again.")
                 continue
-            if n_edits <= edit_budget:
-                return cand, "\n\n---\n\n".join(transcript)
-            prompt += (f"\n\nYour previous candidate changed {n_edits} regions but "
-                       f"the budget is {edit_budget}. Keep your best {edit_budget} "
-                       "edits and reply again.")
-        transcript.append("# SKIPPED: no in-budget candidate after 2 attempts")
-        return None, "\n\n---\n\n".join(transcript)
+            if n_edits > edit_budget:
+                base_left -= 1
+                if base_left <= 0:
+                    transcript.append("# SKIPPED: no in-budget candidate after "
+                                      "2 base attempts")
+                    return _done(None, "budget")
+                prompt += (f"\n\nYour previous candidate changed {n_edits} regions "
+                           f"but the budget is {edit_budget}. Keep your best "
+                           f"{edit_budget} edits and reply again.")
+                continue
+            # Parsed and in budget. Validate (compile + probe) when asked, and
+            # self-repair the exact sandbox/probe error in this same conversation.
+            if validate is not None:
+                try:
+                    validate(cand)
+                except SandboxError as e:
+                    meta["probe_failed"] += 1
+                    if repairs_left <= 0:
+                        transcript.append(f"# REJECTED BY SANDBOX/PROBE "
+                                          f"(repair budget exhausted)\n\n{e}")
+                        return _done(None, "sandbox")
+                    repairs_left -= 1
+                    transcript.append(f"# REJECTED BY SANDBOX/PROBE "
+                                      f"(repairs left {repairs_left})\n\n{e}")
+                    prompt += (
+                        "\n\nYour previous candidate was REJECTED by the "
+                        f"sandbox/probe with this exact error:\n  {e}\n"
+                        "It compiled but failed validation. Fix THIS error "
+                        "specifically and reply again.")
+                    continue
+            return _done(cand, None)

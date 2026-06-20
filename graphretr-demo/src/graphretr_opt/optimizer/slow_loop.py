@@ -8,7 +8,9 @@ an experiment the optimizer runs, not a hand-pick.
 
 Interfaces it will use (all already present):
   FastLoop.run(substrate, seed, steps, campaign) -> ArmResult
-  ParetoArchive (frontier + MAP-Elites cells; keep losing-but-cheaper arms)
+  CandidatePool (reward/pareto.dominates + instance-wise frontier; keep
+    losing-but-cheaper arms) -- the active frontier that replaced the dead,
+    never-read ParetoArchive
   ArmScheduler (Hyperband parity, hysteresis, min-dwell, tabu)
 """
 

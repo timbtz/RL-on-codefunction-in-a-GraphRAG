@@ -89,9 +89,9 @@ def test_mutator_plateau_selects_architect():
     mut = Mutator(agent, "PRIMITIVES-DOC", SAFE_BUILTINS)
     prog = SearchProgram("def search(q, G):\n    return {0: 1.0}\n", family="t")
 
-    cand, _ = mut.propose(prog, _failure(), [], [], edit_budget=4, plateau=False)
+    cand, _, _ = mut.propose(prog, _failure(), [], [], edit_budget=4, plateau=False)
     _check("mutator: off-plateau asks the editor tier", agent.tiers[-1] == "editor")
-    cand2, _ = mut.propose(prog, _failure(), [], [], edit_budget=4, plateau=True)
+    cand2, _, _ = mut.propose(prog, _failure(), [], [], edit_budget=4, plateau=True)
     _check("mutator: on-plateau asks the architect tier", agent.tiers[-1] == "architect")
     _check("mutator: produced a usable candidate from the tiered reply",
            cand is not None and cand2 is not None)

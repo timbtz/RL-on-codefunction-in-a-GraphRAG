@@ -44,6 +44,9 @@ class Config:
     max_edits: int = 4             # L_max
     min_edits: int = 1             # L_min (floor for decaying schedules)
     stop_after_stale: int = 0      # 0 = run all `steps`; else stop after N stale steps
+    repair_budget: int = 0         # compiler-in-the-loop self-repair: 0=off (caller compiles/probes
+                                   # after propose); N => feed the sandbox/probe error back into the
+                                   # SAME mutator conversation for up to N targeted fixes before rejecting
 
     # --- run-6 optimizer evolution (Phase A/B/D) ----------------------------
     pool_enabled: bool = False     # A2/A3: instance-wise Pareto pool vs single incumbent
@@ -82,8 +85,12 @@ class Config:
     extract_model: str = "gpt-4o-mini"      # model behind G.extract
     rerank_model: str = "gpt-4o-mini"       # model behind G.llm_rerank
     reformulate_model: str = "gpt-4o-mini"  # model behind G.reformulate (Phase C1)
+    judge_model: str = "gpt-4o-mini"        # model behind G.judge_sufficient (Item 2)
+    frontier_model: str = "gpt-4o-mini"     # model behind G.pick_frontier (Item 2)
     rerank_pool_max: int = 50               # hard cap on the candidate pool sent per rerank call
     reformulate_ctx_max: int = 10           # C1: max context node docs read per reformulate call
+    judge_ctx_max: int = 20                 # Item 2: max candidate docs sent per judge_sufficient call
+    frontier_ctx_max: int = 20              # Item 2: max candidate docs sent per pick_frontier call
     openai_budget_usd: float = 5.0          # hard $ ceiling, persisted runs/openai_usage.json
 
     # strategy arm

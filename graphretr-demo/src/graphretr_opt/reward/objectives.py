@@ -1,8 +1,8 @@
 """objectives.py -- the metric vector and its component probes.
 
 Reward is a VECTOR, never scalarized. This is enforced from Stage 1 so that
-(a) the gate can stay strict-greater on one quality axis while the archive
-keeps the whole vector, and (b) GEPA's Pareto frontier has a real vector to
+(a) the gate can stay strict-greater on one quality axis while the candidate
+pool keeps the whole vector, and (b) GEPA's Pareto frontier has a real vector to
 work with in Stage 2. Scalarizing here is what produces the "retrieve
 everything" degenerate, so we don't.
 
@@ -71,7 +71,7 @@ def code_complexity(src: str) -> float:
     """Cheap static proxy: AST node count + branch/loop/call weighting,
     normalized so a tiny seed ~ small and a sprawling program ~ large.
     Used as a Pareto axis (prefer the simpler of two equal-quality programs)
-    and available to the slow loop's MAP-Elites cells."""
+    in the dominance test the candidate pool selects on."""
     try:
         tree = ast.parse(src)
     except SyntaxError:

@@ -22,7 +22,7 @@ from graphretr_opt.env.retrieval_graph import RetrievalGraph
 from graphretr_opt.env.sandbox import Sandbox, SandboxError
 from graphretr_opt.artifact.program import SearchProgram
 from graphretr_opt.reward.objectives import MetricVector, code_complexity
-from graphretr_opt.reward.pareto import dominates, ParetoArchive
+from graphretr_opt.reward.pareto import dominates
 from graphretr_opt.optimizer.edit_budget import EditBudget
 
 cfg = load_config()
@@ -136,8 +136,7 @@ except SandboxError as e:
 hi = MetricVector(quality={"recall@20": 0.30, "hit@1": 0.1, "mrr": 0.2}, latency_s=1.0, db_load=5)
 lo = MetricVector(quality={"recall@20": 0.20, "hit@1": 0.0, "mrr": 0.1}, latency_s=2.0, db_load=9)
 assert dominates(hi, lo) and not dominates(lo, hi)
-arch = ParetoArchive(); assert arch.add("a", "f", hi) and not arch.add("b", "f", lo)
-ok("Pareto dominance + archive", f"frontier={len(arch.entries)}")
+ok("Pareto dominance", "hi > lo on every axis")
 
 eb_c = EditBudget("const", 4, 1, 30); eb_cos = EditBudget("cosine", 4, 1, 30)
 assert eb_c.L_t(0) == 4 == eb_c.L_t(29)
