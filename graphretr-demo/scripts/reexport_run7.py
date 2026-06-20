@@ -132,10 +132,11 @@ def main(argv=None):
               "_final_select will fall back to the fixed gate (not the fenced holdout)")
 
     # _final_select only uses _reward / _budget / _gate / _cfg; mutator/edit_budget/
-    # tracker/archive are unused, so pass None.
+    # tracker are unused, so pass None. (archive param removed in a8dba02 -- the dead
+    # ParetoArchive was deleted; CandidatePool is now the live frontier.)
     loop = FastLoop(cfg, campaign.graph, campaign.sandbox, campaign.reward,
                     mutator=None, edit_budget=None, tracker=None,
-                    archive=None, budget=campaign.budget)
+                    budget=campaign.budget)
 
     fn_cache = {}
 

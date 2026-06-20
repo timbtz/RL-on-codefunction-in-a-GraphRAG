@@ -153,6 +153,45 @@ class FastLoop:
             return self._gate.composite(mv)
         return mv.primary  # dominance: fall back to recall@20 for a scalar view
 
+    def _score_candidate(self, cand, cand_fn, gate_idxs, ckey, cache):
+        """The per-candidate evaluation seam (Phase 2). This is the deterministic
+        `score` unit that a process worker would run -- isolated here so the worker
+        body and the serial path are the SAME code. It runs the sandbox on THIS
+        process's main thread so the SIGALRM wall-clock kill fires (the hard
+        constraint: graphretr's kill only works on a worker's main thread, so the
+        candidate must never be scored via a thread executor). Memoized by
+        (sha, gate epoch). -> (mv, cache_hit, seconds)."""
+        t = time.time()
+        s = cache.get(ckey)
+        if s is not None:
+            return s, True, time.time() - t
+        s = self._reward.score(cand_fn, gate_idxs, src=cand.src,
+                               per_query_timeout_s=self._cfg.probe_timeout_s)
+        cache.put(ckey, s)
+        return s, False, time.time() - t
+
+    def _parallel_scoring_enabled(self):
+        """Phase 2 guard: process-parallel scoring is only correct when it is OFF by
+        default (num_workers=1 == today's exact serial path) AND when the OpenAI
+        budget is inactive. The budget is a shared $ ceiling persisted to one file
+        (`openai_usage.json`); workers each making metered OpenAI calls would race
+        that file and mis-account the global ceiling -- a correctness hole, not just
+        a perf one. With the local minilm embedder (no OPENAI_API_KEY -> budget is
+        None) scoring is pure-local and process-parallel is safe. Returns the worker
+        count to use (1 = serial)."""
+        n = int(getattr(self._cfg, "num_workers", 1) or 1)
+        if n <= 1:
+            return 1
+        if self._budget is not None:
+            if not getattr(self, "_warned_budget_serial", False):
+                print("[fast_loop] num_workers>1 ignored: the OpenAI budget is "
+                      "active and is not safe to share across processes -- running "
+                      "serial. (Disable OpenAI / use the minilm embedder to "
+                      "parallelize.)", flush=True)
+                self._warned_budget_serial = True
+            return 1
+        return n
+
     @staticmethod
     def _is_stop_progress(pool_on, admitted, accepted):
         """Phase 2: the stop counter resets on any ADMISSION when the pool drives
@@ -624,15 +663,10 @@ class FastLoop:
                     reason = (f"failed minibatch pre-screen (b={mb_size}, did not "
                               f"clear incumbent within eps)")
                 else:
-                    t_sc = time.time()
-                    s = cache.get(_ckey(cand.sha))
-                    if s is not None:
-                        step_metrics["gate_cache_hit"] = 1
-                    else:
-                        s = self._reward.score(cand_fn, gate_idxs, src=cand.src,
-                                               per_query_timeout_s=cfg.probe_timeout_s)
-                        cache.put(_ckey(cand.sha), s)
-                    step_metrics["score_seconds"] = time.time() - t_sc
+                    s, cache_hit, sec = self._score_candidate(
+                        cand, cand_fn, gate_idxs, _ckey(cand.sha), cache)
+                    step_metrics["gate_cache_hit"] = 1 if cache_hit else 0
+                    step_metrics["score_seconds"] = sec
                     self._tracker.log_vector("val_", s, step=step)
                     frontier_grew, admitted = pool.consider(cand, s)
                     # headline gate (blend) -- updates the monotone reported best.

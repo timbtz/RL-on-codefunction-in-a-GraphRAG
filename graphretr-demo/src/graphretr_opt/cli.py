@@ -9,6 +9,7 @@ Config comes from configs/campaign.yaml + env vars (see config.py); only the
 campaign name and step count are CLI flags.
 """
 import argparse
+import os
 
 from .campaign import Campaign
 from .config import load_config
@@ -45,7 +46,27 @@ def main(argv=None):
                     help="also score on a fixed N-query test subsample (0 = skip)")
     pa.add_argument("--campaign-name", default="ablate")
 
+    pv = sub.add_parser("viz", help="render runs/<campaign>/lineage.jsonl to a "
+                                    "self-contained lineage.html (read-only)")
+    pv.add_argument("--campaign-name", required=True)
+    pv.add_argument("--serve", action="store_true",
+                    help="run a live Flask server (re-reads on each load) instead "
+                         "of writing the static HTML")
+    pv.add_argument("--port", type=int, default=8000)
+    pv.add_argument("--out", default=None, help="static output path (default: "
+                    "runs/<campaign>/lineage.html)")
+
     args = ap.parse_args(argv)
+    if args.cmd == "viz":
+        # read-only; no Campaign.boot() (no FalkorDB / embedder needed)
+        from .config import load_config as _lc
+        from .viz.lineage_viz import export_static, serve
+        run_dir = os.path.join(_lc().runs_dir, args.campaign_name)
+        if args.serve:
+            serve(run_dir, port=args.port)
+        else:
+            print(f"[viz] wrote {export_static(run_dir, args.out)}")
+        return
     overrides = ({"strategy": args.strategy}
                  if getattr(args, "strategy", None) else {})
     if getattr(args, "resume", False):

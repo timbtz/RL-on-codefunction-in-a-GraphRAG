@@ -21,7 +21,12 @@ Axes:
                gate and NOT emitted to MLflow -- it is selection metadata only.
 """
 import ast
+import math
 from dataclasses import dataclass, field, asdict
+
+
+def _is_finite_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 # hit@5 added for the Hit@1 push: the leaderboard reports it and it shows rank
 # movement the binary hit@1 misses. recall@20 stays the Pareto/'primary' axis.
@@ -62,6 +67,37 @@ class MetricVector:
                    code_complexity=self.code_complexity,
                    crashed_frac=self.crashed_frac, crashed=float(self.crashed))
         return out
+
+    def sanitize(self) -> "MetricVector":
+        """Per-component NaN/inf guard (Phase 2). openEvolve filters non-finite
+        metrics (`metrics_utils.py:24-32`) only to feed a SCALARIZED combined_score;
+        we apply the same finite-check PER AXIS of the vector instead -- a candidate
+        whose evaluator math produces a NaN/inf must degrade to a safe-WORST value,
+        never crash the reducer/pool/dominance comparison downstream. We do NOT
+        scalarize: the vector + Pareto dominance stay the comparator (objectives'
+        never-scalarize rule). Any non-finite axis flags the candidate as crashed,
+        so the gate and dominance reject it just like a sandbox crash. In place."""
+        bad = False
+        for k, v in list(self.quality.items()):
+            if not _is_finite_number(v):
+                self.quality[k] = 0.0
+                bad = True
+        for attr in ("latency_s", "db_load", "llm_calls", "rerank_items",
+                     "code_complexity", "crashed_frac", "recall_at_100"):
+            if not _is_finite_number(getattr(self, attr)):
+                setattr(self, attr, 0.0)
+                bad = True
+        for idx, d in list(self.per_query.items()):
+            for k, v in list(d.items()):
+                if not _is_finite_number(v):
+                    d[k] = 0.0
+                    bad = True
+        if bad:
+            # treat a non-finite candidate exactly like a crash: zero quality so it
+            # can never win the gate or dominate a real program.
+            self.quality = {k: 0.0 for k in self.quality}
+            self.crashed = True
+        return self
 
     def to_dict(self) -> dict:
         return asdict(self)

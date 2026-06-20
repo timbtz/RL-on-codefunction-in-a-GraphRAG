@@ -98,4 +98,8 @@ class RewardModel:
         if crashed > self._crash_limit * n:
             mv.quality = self._zero_quality()
             mv.crashed = True
+        # Phase 2 vector-wise guard: a candidate whose math yields a NaN/inf on any
+        # axis degrades to a safe-worst (crashed) vector instead of poisoning the
+        # pool's dominance test / the gate comparison. Per-axis, never scalarized.
+        mv.sanitize()
         return (mv, rows) if return_rows else mv
