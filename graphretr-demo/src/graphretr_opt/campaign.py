@@ -52,7 +52,8 @@ class Campaign:
         self.graph = RetrievalGraph(cfg, backend, PrimitiveCache(),
                                     make_embedder(cfg, budget), llm_budget=budget)
         self.sandbox = Sandbox(self.graph, default_timeout_s=cfg.probe_timeout_s)
-        self.substrate = Substrate()
+        self.substrate = Substrate(meta_holdout_size=cfg.meta_holdout_size,
+                                   meta_seed=cfg.meta_seed)
         self.reward = RewardModel(self.substrate, self.sandbox, cfg.crash_frac_limit)
         self.archive = ParetoArchive()
         return self

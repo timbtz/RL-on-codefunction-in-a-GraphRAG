@@ -6,6 +6,7 @@ one row per step, accepted and rejected alike, with a parent->child sha chain.
 
 Run: PYTHONPATH=$PWD/src .venv/bin/python -m tests.test_lineage
 """
+import contextlib
 import json
 import os
 import tempfile
@@ -81,6 +82,15 @@ class _FakeTracker:
     def log_metrics(self, *a, **k):
         pass
 
+    # Phase G tracing seams: the loop calls these unconditionally; mirror the real
+    # tracker's disabled contract (step_span yields None, record_step is a no-op).
+    @contextlib.contextmanager
+    def step_span(self, name, inputs=None):
+        yield None
+
+    def record_step(self, span, outputs=None, attributes=None):
+        pass
+
 
 class _FakeArchive:
     def add(self, *a, **k):
@@ -136,8 +146,11 @@ def test_lineage_chain():
         _check("change_summary is non-empty", bool(r0["change_summary"]))
         _check("edit_budget recorded", r0["edit_budget"] == 2)
         _check("gate_tag recorded", r0["gate_tag"] == "fix")
+        # run-6: acceptance is pool admission; the reason names why it was kept.
         _check("reason present for accepted row",
-               r0["reason"] == "accepted (gate improved)")
+               "admitted to pool" in r0["reason"])
+        _check("pool/admission bookkeeping present in lineage",
+               r0.get("admitted") is True and "pool_size" in r0)
 
 
 def test_lineage_records_rejects():

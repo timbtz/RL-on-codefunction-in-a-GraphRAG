@@ -26,7 +26,16 @@ buffer_last: 8          # rejected-edit summaries fed back into the prompt
 edit_schedule: cosine   # const | cosine | linear  (the "learning rate"): big edits early, fine late
 max_edits: 6            # L_max: edit-block budget per mutation
 min_edits: 2            # L_min: floor for decaying schedules
-stop_after_stale: 8     # stop after 8 consecutive non-accepts (plateau-termination)
+stop_after_stale: 8     # stop after 8 STALE steps (no new Pareto-front member; plateau-termination)
+
+# run-6 optimizer evolution (Phase A/B/D) -- see .agents/Plan/run6-optimizer-evolution-plan.md
+pool_enabled: true      # A: instance-wise Pareto pool replaces the single incumbent
+pool_cap: 24            # A2: max pool members (frontier + top-K)
+pool_discount: true     # D3: weight parent pick by 1/(1+children) so under-explored members stay sampled
+minibatch_size: 20      # B2: cheap pre-screen size before paying the full ~200-query gate
+meta_holdout_size: 300  # B3: val queries fenced off from the gate (overfit detector, never gates)
+meta_seed: 1234         # B3: seeds the meta-holdout partition
+meta_eval_every: 3      # B3: score best on the holdout every 3 accepts; log gate - meta
 
 # hard caps / safety walls
 query_timeout_ms: 2000
@@ -36,20 +45,26 @@ probe_timeout_s: 10.0
 crash_frac_limit: 0.10
 
 # mutator
-mutator_agent: single   # single | tiered (Haiku analyst -> Sonnet editor -> Opus architect)
+mutator_agent: tiered   # single | tiered (Haiku analyst -> Sonnet editor -> Opus architect)
 mutator_backend: cli    # cli (claude -p) | sdk (anthropic client; needs API key)
-mutator_model: opus     # SingleCoder model (tiered arm uses the three below instead)
-analyst_model: haiku    # tiered: cheap evidence digest
-editor_model: sonnet    # tiered: routine edits
-architect_model: opus   # tiered: plateau escalation
+# explicit ids, NOT bare aliases: the CLI alias "opus" resolves to its newest (4.8);
+# we deliberately pin 4.7 (same $5/$25 price, 1M ctx). Haiku=high-Q, newest Sonnet.
+mutator_model: claude-opus-4-7      # SingleCoder model (tiered arm uses the three below instead)
+analyst_model: claude-haiku-4-5     # tiered: cheap evidence digest (Haiku 4.5)
+editor_model: claude-sonnet-4-6     # tiered: routine edits (newest Sonnet)
+architect_model: claude-opus-4-7    # tiered: plateau escalation (Opus 4.7, not 4.8)
 architect_plateau: 3    # consecutive non-accepts before escalating editor -> architect
 llm_timeout_s: 900
 
-# openai (embedder + G.extract); key in .env, ledger at runs/openai_usage.json
+# openai (embedder + G.extract/llm_rerank/reformulate); key in .env, ledger at runs/openai_usage.json
 embedder: openai_small
-extract_model: gpt-4o-mini  # model behind the fixed-prompt G.extract
-openai_budget_usd: 10.0     # hard $ ceiling shared by embedder + extract
+extract_model: gpt-4o-mini      # model behind the fixed-prompt G.extract
+rerank_model: gpt-4o-mini       # model behind G.llm_rerank
+reformulate_model: gpt-4o-mini  # model behind G.reformulate (Phase C1)
+openai_budget_usd: 15.0         # hard $ ceiling shared by embedder + extract/rerank/reformulate (raised 10->15 for run-7, 2026-06-19)
 
-# strategy arm (layer 3): which seed family this campaign descends
-# (override per run: python -m graphretr_opt.cli optimize --strategy extract_first)
-strategy: extract_first
+# strategy arm (layer 3): which seed family this campaign descends. run-6 arm:
+# reasoning_first_v6 (run-5 rerank + G.reformulate). For the run6a loop-only
+# checkpoint, override: --strategy reasoning_first  (and set pool_enabled true,
+# minibatch_size/meta_holdout_size 0 to isolate the pool).
+strategy: reasoning_first_v6

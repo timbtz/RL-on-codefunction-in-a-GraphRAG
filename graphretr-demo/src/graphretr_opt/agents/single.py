@@ -10,9 +10,12 @@ import time
 from collections import Counter
 
 _MODEL_ALIASES = {  # CLI accepts aliases; the SDK needs real model ids
-    "opus": "claude-opus-4-8",
+    # opus pinned to 4.7 (NOT the newest 4.8): same price ($5/$25 per 1M) and
+    # 1M ctx, preferred here for the architect tier. NOTE the bare CLI alias
+    # "opus" resolves to the CLI's latest (4.8), so configs pass explicit ids.
+    "opus": "claude-opus-4-7",
     "sonnet": "claude-sonnet-4-6",
-    "haiku": "claude-haiku-4-5-20251001",
+    "haiku": "claude-haiku-4-5",
 }
 
 

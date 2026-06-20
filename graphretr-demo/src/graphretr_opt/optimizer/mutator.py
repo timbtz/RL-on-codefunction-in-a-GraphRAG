@@ -32,6 +32,11 @@ def _format_failures(failures):
     parts = []
     for i, f in enumerate(failures, 1):
         sec = [f"[{i}] ({f['bucket']}) {f['query']}", f"    {_fmt_metrics(f['metrics'])}"]
+        if f.get("attribution"):
+            sec.append(f"    -> {f['attribution']}")
+        if f.get("empty_result"):
+            sec.append("    EMPTY: search() returned no candidates for this query "
+                       "(dead traversal -- broaden retrieval before re-ranking)")
         if f.get("error"):
             sec.append(f"    ERROR: {f['error']}")
         for nid, text in f["missed_gold"]:
@@ -100,7 +105,11 @@ fix the SCORING, not the recall. Gold answer sets often contain MANY nodes \
 ## Your task
 1. Diagnose in a few sentences WHY the incumbent misses or mis-ranks these gold
    nodes (look at what the missed/out-ranking node texts share and which
-   primitives could reach or re-rank them).
+   primitives could reach or re-rank them). ATTRIBUTE each failure using its
+   `->` tag: a RANKING failure (gold reachable in top-100 but not top-20) needs
+   a SCORING/rerank fix, NOT broader retrieval; a GENERATION failure (gold not
+   in top-100) needs broader or REFORMULATED retrieval, not more re-ranking.
+   Name the specific program element (which call/branch) responsible.
 2. Propose your change as up to {max_edits} SEARCH/REPLACE blocks. Each block:
    <<<<<<< SEARCH
    <exact contiguous lines copied verbatim from the incumbent>

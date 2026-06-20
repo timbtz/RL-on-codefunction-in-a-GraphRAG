@@ -8,10 +8,17 @@ everything" degenerate, so we don't.
 
 Axes:
   quality   -- {recall@20, hit@1, hit@5, mrr} node-containment (STaRK Evaluator)
+  recall_at_100 -- large-K reachability diagnostic (Phase C2, NON-gated): when
+                   gold is reachable recall@100 >> recall@20, so the gap tells us
+                   per query whether the bottleneck is generation or ranking.
   latency_s -- mean wall-clock per query (lower better)
   db_load   -- mean backend queries per query (lower better)
   code_complexity -- proxy for program size/branching (lower better)
   crashed_frac, crashed -- reliability bookkeeping
+  per_query -- {idx: {mrr, hit@1, recall@100}} retained per gate query (Phase A1)
+               so the candidate pool can select instance-wise (sole-best on a
+               single query), not just on the aggregate. NOT scalarized into the
+               gate and NOT emitted to MLflow -- it is selection metadata only.
 """
 import ast
 from dataclasses import dataclass, field, asdict
@@ -30,6 +37,8 @@ class MetricVector:
     code_complexity: float = 0.0
     crashed_frac: float = 0.0
     crashed: bool = False
+    recall_at_100: float = 0.0            # Phase C2 diagnostic axis (non-gated)
+    per_query: dict = field(default_factory=dict)  # Phase A1: idx -> {mrr, hit@1, recall@100}
 
     @property
     def primary(self) -> float:
@@ -40,10 +49,12 @@ class MetricVector:
         return self.quality.get(metric, 0.0)
 
     def as_flat(self) -> dict:
-        """Flat dict for MLflow logging (no '@' -- not a legal metric char)."""
+        """Flat dict for MLflow logging (no '@' -- not a legal metric char).
+        per_query is selection-only metadata and is deliberately omitted (it is
+        a dict, not a scalar metric)."""
         out = {f"quality_{k.replace('@', '_at_')}": v for k, v in self.quality.items()}
         out.update(latency_s=self.latency_s, db_load=self.db_load,
-                   llm_calls=self.llm_calls,
+                   llm_calls=self.llm_calls, recall_at_100=self.recall_at_100,
                    code_complexity=self.code_complexity,
                    crashed_frac=self.crashed_frac, crashed=float(self.crashed))
         return out

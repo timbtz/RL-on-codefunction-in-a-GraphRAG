@@ -1,0 +1,13 @@
+# Strategy family "reasoning_first_v6" -- the run-6 arm: run-5 reasoning-rerank
+# plus the new recall operator G.reformulate.
+family: reasoning_first_v6
+seed: src/graphretr_opt/artifact/seeds/reasoning_first_v6.py
+notes: >
+  extract -> typed dense retrieve -> llm_rerank -> conditionally
+  { reformulate -> re-retrieve -> merge -> rerank } -> stop. The conditional
+  second hop attacks the recall ceiling (gold out-of-pool ~half the time): when
+  the first rerank is weak, reformulate the query from the top context and
+  re-retrieve. Hop/stop policy is editable Python gated by the metered llm_calls
+  cost axis; extract/llm_rerank/reformulate prompts stay fixed (editable is
+  run-7). Pairs with the run-6 optimizer: instance-wise Pareto pool, reflective
+  attribution, minibatch pre-screen, meta-holdout, tiered proposer.

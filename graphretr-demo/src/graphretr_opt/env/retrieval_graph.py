@@ -47,6 +47,16 @@ RELATIONAL relevance and reasoning -- a correct answer can share few words with
 the question, and a wordy near-duplicate can be wrong. Return ONLY a JSON
 object {"scores": {"<index>": <float in 0..1>, ...}} with one entry per index."""
 
+_REFORMULATE_SYSTEM = """\
+You rewrite a biomedical knowledge-graph search query when the first retrieval
+looked weak. Given the original question and the documents of its top retrieved
+nodes, write ONE improved search query that would surface the entity the
+question actually asks for: name the likely answer entity/type and the salient
+biomedical relationship in plain terms, drop question phrasing, and add precise
+synonyms or the connecting concept the first pass missed. Do NOT invent facts
+not implied by the question or the context. Return ONLY a JSON object
+{"query": "<the rewritten query, one line>"}."""
+
 
 class RetrievalGraph:
     def __init__(self, cfg, backend, cache: PrimitiveCache = None,
@@ -62,6 +72,8 @@ class RetrievalGraph:
         self._extract_mem = None     # lazy-loaded disk cache
         self._rerank_disk = os.path.join(cfg.runs_dir, "llm_rerank_cache.json")
         self._rerank_mem = None      # lazy-loaded disk cache
+        self._reformulate_disk = os.path.join(cfg.runs_dir, "reformulate_cache.json")
+        self._reformulate_mem = None  # lazy-loaded disk cache
 
         # One-time engine safety config (global to our container alone).
         backend.configure("TIMEOUT_MAX", 10_000)
@@ -346,6 +358,51 @@ class RetrievalGraph:
         ranked = sorted(scores.items(), key=lambda t: t[1], reverse=True)
         return [(int(i), s) for i, s in ranked[:top]]
 
+    def reformulate(self, context_ids, top=10):
+        """Rewrite the current query from the documents of the top retrieved
+        nodes when the first pass looks weak (fixed prompt, fixed schema). Reads
+        the CURRENT query q (the sandbox pins it -- a program cannot reformulate
+        arbitrary text), plus up to `reformulate_ctx_max` of the given context
+        node docs. -> a new query string the program can re-embed (falls back to
+        the original q if the model returns nothing usable). Metered + costed +
+        cached on disk by (q, context pool) exactly like extract()/llm_rerank()
+        -- repeat (q, pool) pairs are free and resume-safe."""
+        q = self._pinned_query
+        if not q:
+            raise ValueError("reformulate() accepts only the current query q "
+                             "(none is pinned)")
+        if self._llm_budget is None:
+            raise ValueError("reformulate() is not enabled (no OPENAI_API_KEY)")
+        # Dedup preserving caller (rank) order, capped at the smaller of `top`
+        # and the configured context budget. Cache key is order-independent.
+        cap = min(self._cap(top, "top", self._cfg.max_fanout),
+                  self._cfg.reformulate_ctx_max)
+        seen, pool = set(), []
+        for nid in P.ids_in(context_ids):
+            if nid not in seen and len(pool) < cap:
+                seen.add(nid)
+                pool.append(nid)
+        self._llm_calls += 1
+        if self._reformulate_mem is None:
+            self._reformulate_mem = (json.load(open(self._reformulate_disk))
+                                     if os.path.exists(self._reformulate_disk) else {})
+        ckey = q + "\x00" + ",".join(str(i) for i in sorted(pool))
+        new_q = self._reformulate_mem.get(ckey)
+        if new_q is None:
+            texts = self.get_text(pool, limit=len(pool)) if pool else {}
+            lines = "\n".join(f"- {texts.get(nid, '')[:300]}" for nid in pool)
+            raw = self._llm_budget.chat_json(
+                _REFORMULATE_SYSTEM,
+                f"Original question: {q}\n\nTop retrieved context:\n{lines}",
+                model=self._cfg.reformulate_model, max_tokens=120)
+            cand = raw.get("query") if isinstance(raw, dict) else None
+            new_q = cand.strip() if isinstance(cand, str) and cand.strip() else q
+            new_q = new_q[:300]
+            self._reformulate_mem[ckey] = new_q
+            os.makedirs(os.path.dirname(self._reformulate_disk), exist_ok=True)
+            json.dump(self._reformulate_mem, open(self._reformulate_disk, "w"))
+        return new_q
+
     def get_text(self, ids, limit=50):
         """Fetch node documents. -> {node_id: text}, at most `limit` entries."""
         ids = P.ids_in(ids)
@@ -426,6 +483,16 @@ G.llm_rerank(q, ids, top=20) -> list[(node_id, score)]
     reasoning, so it can rank a text-dissimilar correct answer above a wordy
     decoy -- but each unique (q, pool) costs one billed LLM call, so rerank a
     small dense top-k, not the whole graph.
+G.reformulate(context_ids, top=10) -> str
+    Rewrite the query q from the docs of its top retrieved nodes when the first
+    retrieval looks weak (gold likely NOT generated -- e.g. first rerank score
+    low, or recall@20 short of recall@100). Returns a NEW query string to
+    re-embed with vector_search/text_search, then merge the fresh pool. Operates
+    on the current q only (you cannot reformulate arbitrary text); reads up to
+    {cfg.reformulate_ctx_max} context docs; one billed LLM call per unique
+    (q, pool), cached. Use it to attack RECALL (generation), not ranking; a
+    wasted call is penalized by the metered llm_calls cost axis, so only
+    reformulate when the first hop is weak.
 G.get_text(ids, limit=50) -> dict[node_id, str]
     Node documents (name + type + details), for inspection/filtering.
 

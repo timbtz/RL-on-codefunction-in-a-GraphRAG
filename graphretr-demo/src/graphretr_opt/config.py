@@ -43,7 +43,17 @@ class Config:
     edit_schedule: str = "const"   # const | cosine | linear
     max_edits: int = 4             # L_max
     min_edits: int = 1             # L_min (floor for decaying schedules)
-    stop_after_stale: int = 0      # 0 = run all `steps`; else stop after N non-accepts
+    stop_after_stale: int = 0      # 0 = run all `steps`; else stop after N stale steps
+
+    # --- run-6 optimizer evolution (Phase A/B/D) ----------------------------
+    pool_enabled: bool = False     # A2/A3: instance-wise Pareto pool vs single incumbent
+    pool_cap: int = 24             # A2: max pool members (frontier + top-K)
+    pool_discount: bool = True     # D3: weight parent pick by 1/(1+children)
+    minibatch_size: int = 0        # B2: 0=off; else cheap pre-screen size before the full gate
+    meta_holdout_size: int = 0     # B3: 0=off; else val queries fenced off from the gate
+    meta_seed: int = 1234          # B3: seeds the meta-holdout partition
+    meta_eval_every: int = 0       # B3: 0=off; else score best on the holdout every N accepts
+    select_holdout_n: int = 0      # Phase 1 final bake-off: 0=use full meta-holdout; else subsample to cap cost/latency
 
     # hard caps / safety walls
     query_timeout_ms: int = 2000
@@ -53,12 +63,14 @@ class Config:
     crash_frac_limit: float = 0.10
 
     # mutator
-    mutator_agent: str = "single"           # single | tiered (model tiering)
+    mutator_agent: str = "tiered"           # single | tiered (model tiering)
     mutator_backend: str = "cli"
-    mutator_model: str = "opus"             # SingleCoder model (tiered ignores it)
-    analyst_model: str = "haiku"            # tiered: cheap evidence digest
-    editor_model: str = "sonnet"            # tiered: routine edits
-    architect_model: str = "opus"           # tiered: plateau escalation
+    # explicit ids (NOT bare aliases): the CLI alias "opus" resolves to its
+    # latest (4.8); we want 4.7. opus 4.7 == 4.8 price, preferred here.
+    mutator_model: str = "claude-opus-4-7"      # SingleCoder model (tiered ignores it)
+    analyst_model: str = "claude-haiku-4-5"     # tiered: cheap evidence digest
+    editor_model: str = "claude-sonnet-4-6"     # tiered: routine edits
+    architect_model: str = "claude-opus-4-7"    # tiered: plateau escalation
     architect_plateau: int = 3              # consecutive non-accepts before escalating
     llm_timeout_s: int = 900
 
@@ -66,7 +78,9 @@ class Config:
     embedder: str = "minilm"                # minilm | openai_small (needs re-indexed graph)
     extract_model: str = "gpt-4o-mini"      # model behind G.extract
     rerank_model: str = "gpt-4o-mini"       # model behind G.llm_rerank
+    reformulate_model: str = "gpt-4o-mini"  # model behind G.reformulate (Phase C1)
     rerank_pool_max: int = 50               # hard cap on the candidate pool sent per rerank call
+    reformulate_ctx_max: int = 10           # C1: max context node docs read per reformulate call
     openai_budget_usd: float = 5.0          # hard $ ceiling, persisted runs/openai_usage.json
 
     # strategy arm
