@@ -1,0 +1,57 @@
+[
+  {
+    "question": "Welche 2 AddOns laufen im IOT Devicegateway?",
+    "answer": "NLB & external DNS",
+    "source": "Sascha Klockenbusch (Teams-Chat)"
+  },
+  {
+    "question": "Welcher Paketmanager wird für das Deployment der Connectware Cybus verwendet?",
+    "answer": "HELM",
+    "source": "Prakash Prabhakaran (Teams-Chat)"
+  },
+  {
+    "question": "Was ist ein typischer Fehler in Collins, wenn ein neuer Use Case nicht auf das API-Gateway zugreifen kann?",
+    "answer": "Dieser Fehler tritt auf, wenn die Rolle für den neuen Use Case nicht in den API-Gateways hinzugefügt oder gelöscht wurde.",
+    "source": "Prakash Prabhakaran (Teams-Chat)"
+  },
+  {
+    "question": "Wie können wir einen Aufruf von einem Anwendungsfall an Collins debuggen?",
+    "answer": "Er kann mithilfe der requestID debuggt werden.",
+    "source": "Prakash Prabhakaran (Teams-Chat)"
+  },
+  {
+    "question": "In welchen Fällen werden Cloudwatch-Alarme in Collins ausgelöst?",
+    "answer": "Ungültige Features und falsche Payloads",
+    "source": "Prakash Prabhakaran (Teams-Chat)"
+  },
+  {
+    "question": "Ist MQTT in Shoco verschlüsselt oder unverschlüsselt?",
+    "answer": "Unverschlüsselt",
+    "source": "Prakash Prabhakaran (Teams-Chat)"
+  },
+  {
+    "question": "Was ist zu tun, wenn im Cybus die einzelnen Container/Services als Online/Enable/Grün stehen, es dennoch Probleme gibt?",
+    "answer": "Es ist ein bekanntes Problem, dass die Statusanzeige im Cybus fehlerhaft sein kann. Selber die Agents und AWS Services überprüfen.",
+    "source": "Sascha Klockenbusch (Teams-Chat)"
+  },
+  {
+    "question": "Was könnte einen Bandstillstand verursachen, wenn die Agenten/Pods gestoppt werden?",
+    "answer": "Ein Bandstillstand kann auftreten, nachdem die Pods gestoppt wurden, wenn die Puffereinträge mehr als 100 überschreiten.",
+    "source": "Prakash Prabhakaran (Teams-Chat)"
+  },
+  {
+    "question": "Wie analysiert man, wenn nach einem Anruf einer Use Case Daten fehlen?",
+    "answer": "Wir sollten zunächst PDH überprüfen. Wenn auf der PDH-Seite kein Problem vorliegt, können wir sicher sein, dass das Problem bei Cybus liegt.",
+    "source": "Prakash Prabhakaran (Teams-Chat)"
+  },
+  {
+    "question": "Wann kann ein Ticket zurück an die Instandhaltung weitergeleitet werden und warum passiert das?",
+    "answer": "Ein Ticket kann an die Instandhaltung weitergeleitet werden, wenn keine Verbindung zwischen der Maschine und dem Broker besteht. Dies kann aufgrund von Netzwerkproblemen oder aufgrund abgelaufener Zertifikate geschehen.",
+    "source": "Prakash Prabhakaran (Teams-Chat)"
+  },
+  {
+    "question": "Wenn wir in der Mapping-Ansicht sehen, dass Nachrichten von den Maschinen eingehen und subscribe sind, aber nicht zum Topic republish werden, was kann man da tun?",
+    "answer": "Wir können die Mapping-Funktion einfach disable und enable machen.",
+    "source": "Prakash Prabhakaran (Teams-Chat)"
+  }
+]

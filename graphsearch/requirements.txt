@@ -1,0 +1,10 @@
+# graphsearch — runtime deps for the copied agentic graph search service.
+# Pins mirror the source repo (knowledge-management-platform/pyproject.toml).
+langchain-neo4j>=0.8.0
+langchain-core>=1.2.12
+langchain>=1.2.10
+
+# Needed only to actually run a search (concrete chat model + Neo4j driver):
+langchain-openai>=1.1.9
+langchain-anthropic>=1.3.4
+neo4j>=6.1.0
