@@ -12,14 +12,7 @@ import time
 from dataclasses import replace
 
 from .config import load_config, load_strategy, dump_resolved_config
-from .data.substrate import Substrate
-from .env.backends.falkordb import FalkorDBBackend
-from .env.cache import PrimitiveCache
-from .env.embedder import make_embedder
-from .env.openai_client import OpenAIBudget
-from .env.retrieval_graph import RetrievalGraph
-from .env.sandbox import Sandbox, SandboxError, SAFE_BUILTINS
-from .reward.evaluator import RewardModel
+from .env.sandbox import SandboxError, SAFE_BUILTINS
 from .reward.objectives import QUALITY_KEYS
 from .artifact.program import SearchProgram
 from .agents.single import SingleCoder
@@ -28,6 +21,26 @@ from .optimizer.edit_budget import EditBudget
 from .optimizer.mutator import Mutator
 from .optimizer.fast_loop import FastLoop
 from .tracking.mlflow_tracker import MlflowTracker, maybe_enable_openai_tracing
+
+# NOTE: the function-campaign's heavy deps (Substrate->stark_qa, RewardModel->
+# torch, FalkorDBBackend->falkordb, RetrievalGraph/embedder->numpy) are imported
+# INSIDE boot() rather than at module top, so the graph_search path
+# (boot_search/optimize_search) can be imported and run on a machine that has
+# none of them installed. The function path is unchanged -- it just imports a
+# few ms later.
+
+
+SEARCH_DOMAIN_NOTE = (
+    "Target: AgenticGraphTraversalSearchService over a Neo4j knowledge graph "
+    "(German company KG). Retrieval = fulltext seed lookup on the `ft_Entities` "
+    "index, then recursive neighbour traversal; each frontier node's Documents "
+    "are LLM-filtered for usefulness; an LLM judges sufficiency and picks which "
+    "entities to expand next. Cost levers (also the cost axes you are scored on): "
+    "max_depth, neighbor_limit, docs_per_entity, max_frontier, max_workers, and "
+    "how many LLM calls per node (_filter_useful_docs / _judge_sufficient / "
+    "_pick_next_entities). Documents carry [doc:ID] citations. There are NO "
+    "embeddings. Keep `search(query) -> str` returning the retrieved context."
+)
 
 
 class Campaign:
@@ -38,6 +51,15 @@ class Campaign:
 
     def boot(self):
         cfg = self.cfg
+        # function-campaign deps imported lazily (see module-top note)
+        from .data.substrate import Substrate
+        from .env.backends.falkordb import FalkorDBBackend
+        from .env.cache import PrimitiveCache
+        from .env.embedder import make_embedder
+        from .env.openai_client import OpenAIBudget
+        from .env.retrieval_graph import RetrievalGraph
+        from .env.sandbox import Sandbox
+        from .reward.evaluator import RewardModel
         backend = FalkorDBBackend(cfg.falkor_host, cfg.falkor_port, cfg.graph_name)
         # One shared metered OpenAI gateway for the embedder AND G.extract;
         # without a key both stay disabled and the minilm path works as before.
@@ -100,6 +122,202 @@ class Campaign:
             tracker.log_artifacts(run_dir)
         print(f"[campaign] best program -> {os.path.join(run_dir, 'best_search.py')}")
         return result
+
+    # --------------------------------------------------- graph_search target
+
+    def boot_search(self):
+        """Assemble the graph_search stack: QaSubstrate (MCQ gold) + answerer +
+        SearchTarget (fake or subprocess) + McqReward(Adapter) + FileSet seed +
+        NullSandbox/NullGraph. No FalkorDB / RetrievalGraph / Sandbox / stark_qa /
+        torch on this path -- the AST gate and G primitives are GONE here."""
+        from .data.qa_substrate import QaSubstrate
+        from .env.null_sandbox import NullGraph, NullSandbox
+        from .env.targets.fake_target import FakeSearchTarget
+        from .reward.mcq_reward import McqReward, StubAnswerer
+        from .reward.mcq_reward_adapter import McqRewardAdapter
+        from .artifact.file_set import FileSet
+        # campaign.yaml is tuned for STaRK (gate_size=1941, recall@20 gate,
+        # complexity cap, large meta-holdout). The MCQ set is tiny and the metric
+        # is mcq_accuracy, so re-derive the gate knobs for this target from the
+        # dataset size before building anything (explicit env/kwargs still win
+        # where they make sense).
+        import json as _json
+        n = len(_json.load(open(self.cfg.dataset_path_abs, encoding="utf-8")))
+        self.cfg = self._search_cfg(self.cfg, n)
+        cfg = self.cfg
+
+        self.search_substrate = QaSubstrate(
+            dataset_path=cfg.dataset_path_abs,
+            meta_holdout_size=cfg.meta_holdout_size, meta_seed=cfg.meta_seed)
+
+        answerer = self._build_answerer()
+        if cfg.fake_target:
+            target = FakeSearchTarget()
+            print("[campaign] graph_search: FakeSearchTarget (offline, no infra)")
+        else:
+            from .env.targets.subprocess_target import SubprocessSearchTarget
+            target = SubprocessSearchTarget(
+                neo4j_cfg={"url": cfg.neo4j_url, "username": cfg.neo4j_user,
+                           "password": cfg.neo4j_password,
+                           "database": cfg.neo4j_database},
+                llm_cfg={"provider": cfg.search_provider, "model": cfg.search_model},
+                opt_src_dir=cfg.opt_src_abs,
+                service_relpath=cfg.editable_files[0] if cfg.editable_files else None)
+            print(f"[campaign] graph_search: SubprocessSearchTarget over "
+                  f"{cfg.graphsearch_src_abs}")
+
+        mcq = McqReward(answerer, crash_frac_limit=cfg.crash_frac_limit)
+        self.search_reward = McqRewardAdapter(
+            target, mcq, self.search_substrate,
+            default_timeout_s=cfg.search_timeout_s)
+        self.search_seed = FileSet.from_base(cfg.graphsearch_src_abs,
+                                             cfg.editable_files)
+        self.search_sandbox = NullSandbox()
+        self.search_graph = NullGraph()
+        self.budget = None  # OpenAI budget metering is in the subprocess, not here
+        used_stub = isinstance(answerer, StubAnswerer)
+        print(f"[campaign] graph_search seed sha={self.search_seed.sha[:8]} "
+              f"editable={list(self.search_seed.editable)} "
+              f"answerer={'STUB' if used_stub else cfg.answerer_model}")
+        return self
+
+    @staticmethod
+    def _search_cfg(cfg, n):
+        """Re-derive STaRK-specific gate knobs for the graph_search target from
+        the MCQ dataset size `n`. Switches the gate to mcq_accuracy/strict, drops
+        the AST complexity cap (the real service file is far larger than the
+        function seed -- the cap is meaningless here), and shrinks gate /
+        minibatch / meta-holdout so the small set yields a non-empty gate pool."""
+        # meta-holdout must leave a non-empty gate pool; disable on tiny sets
+        mh = cfg.meta_holdout_size if (cfg.meta_holdout_size
+                                       and cfg.meta_holdout_size < n) else 0
+        if mh and (n - mh) < 1:
+            mh = 0
+        mb = cfg.minibatch_size if (cfg.minibatch_size
+                                    and cfg.minibatch_size < n) else 0
+        return replace(
+            cfg,
+            gate_metric="mcq_accuracy",
+            # Cost-aware gate: admit on composite = mcq_accuracy - w*usd_cost, so
+            # the optimizer actively trades REAL dollars against accuracy (the
+            # whole point -- raw call count was the wrong unit). w is tunable via
+            # search_cost_weight / SEARCH_COST_WEIGHT. usd_cost resolves through
+            # MetricVector.get()'s attr fallback.
+            gate_mode="blend",
+            gate_blend=f"mcq_accuracy:1.0,usd_cost:{-cfg.search_cost_weight}",
+            gate_max_complexity=0.0,
+            gate_rotate_every=0,
+            gate_size=min(cfg.gate_size, n),
+            rollout_batch=min(cfg.rollout_batch, n),  # train pool is the tiny MCQ set
+            meta_holdout_size=mh,
+            minibatch_size=mb,
+            meta_eval_every=(cfg.meta_eval_every if mh else 0),
+            # FastLoop passes `probe_timeout_s` as the per-eval wall-clock; the
+            # STaRK default (10s) suits sub-second in-process probes, but here it
+            # is the timeout for a whole subprocess batch of real agentic queries
+            # (tens of LLM calls each). Use the graph_search batch budget instead.
+            probe_timeout_s=cfg.search_timeout_s,
+        )
+
+    def _build_answerer(self):
+        """The MCQ answerer (true-external dep; temperature=0). Falls back to the
+        deterministic StubAnswerer when running the fake target with no API key
+        (the offline smoke path)."""
+        from .reward.mcq_reward import StubAnswerer
+        cfg = self.cfg
+        has_key = bool(os.environ.get("OPENAI_API_KEY")
+                       or os.environ.get("ANTHROPIC_API_KEY")
+                       or os.environ.get("OPENROUTER_API_KEY"))
+        if cfg.fake_target and not has_key:
+            return StubAnswerer()
+        provider = cfg.answerer_provider.lower()
+        if provider in ("openai", "azure_openai"):
+            from langchain_openai import ChatOpenAI
+            # Route through OpenRouter (OpenAI-compatible) when configured.
+            extra = {}
+            if os.environ.get("OPENROUTER_API_KEY"):
+                extra = {"base_url": os.environ.get("OPENROUTER_BASE_URL",
+                                                    "https://openrouter.ai/api/v1"),
+                         "api_key": os.environ["OPENROUTER_API_KEY"],
+                         # usage.include -> real USD cost in token_usage.cost,
+                         # read by mcq_reward._answerer_cost
+                         "extra_body": {"usage": {"include": True}}}
+            return ChatOpenAI(model=cfg.answerer_model, temperature=0, **extra)
+        if provider == "anthropic":
+            from langchain_anthropic import ChatAnthropic
+            return ChatAnthropic(model=cfg.answerer_model, temperature=0)
+        raise ValueError(f"unknown answerer provider {provider!r}")
+
+    def _make_search_mutator(self):
+        cfg = self.cfg
+        if cfg.mutator_agent == "tiered":
+            agent = TieredCoder(cfg.mutator_backend, cfg.analyst_model,
+                                cfg.editor_model, cfg.architect_model,
+                                cfg.llm_timeout_s)
+        else:
+            agent = SingleCoder(cfg.mutator_backend, cfg.mutator_model,
+                                cfg.llm_timeout_s)
+        return Mutator(agent, SEARCH_DOMAIN_NOTE, safe_builtins={})
+
+    def optimize_search(self, steps=None, campaign="search"):
+        """The graph_search entrypoint -- mirrors optimize() but wires the
+        SearchTarget + McqReward stack into FastLoop with a NullSandbox (no AST
+        gate / in-process exec; isolation is the subprocess). Logs the MCQ dataset
+        + per-question recap tables to MLflow."""
+        cfg = self.cfg
+        steps = steps if steps is not None else cfg.steps
+        edit_budget = EditBudget(cfg.edit_schedule, cfg.max_edits, cfg.min_edits,
+                                 max(1, steps))
+        mutator = self._make_search_mutator()
+        seed = self.search_seed
+        run_dir = os.path.join(cfg.runs_dir, campaign)
+        os.makedirs(run_dir, exist_ok=True)
+        cfg_path, cfg_hash = dump_resolved_config(cfg, run_dir)
+
+        with MlflowTracker(cfg).start(campaign, params={
+            **{k: v for k, v in vars(cfg).items() if k != "root"},
+            "campaign": campaign, "steps": steps, "git_sha": _git_sha(),
+            "config_hash": cfg_hash, "target": "graph_search",
+        }) as tracker:
+            tracker.set_tags({"approach": campaign, "target": "graph_search",
+                              "config_hash": cfg_hash})
+            tracker.log_dataset(cfg.dataset_path_abs, context="eval")
+            loop = FastLoop(cfg, self.search_graph, self.search_sandbox,
+                            self.search_reward, mutator, edit_budget, tracker,
+                            budget=None)
+            result = loop.run(self.search_substrate, seed, steps, campaign)
+            self._log_search_recap(tracker, run_dir, result.best_program)
+            tracker.log_artifacts(run_dir)
+        mv = result.best_metrics
+        print(f"[campaign] graph_search best quality: "
+              f"{ {k: round(v, 4) for k, v in (mv.quality.items() if mv else [])} }")
+        print(f"[campaign] best overlay -> {os.path.join(run_dir, 'best_search.py')}")
+        return result
+
+    def _log_search_recap(self, tracker, run_dir, best_program):
+        """Score the FINAL best FileSet on the gate with per-question rows and log
+        them as an MLflow recap table (chosen/gold/correct/retrieval_hit) -- the
+        fix for "we see virtually nothing in MLflow". Also persisted as a Parquet/
+        JSON artifact for offline analysis."""
+        sub = self.search_substrate
+        gate = sub.gate_idxs(run_dir, self.cfg.gate_size, self.cfg.gate_seed)
+        try:
+            _, rows = self.search_reward.score(
+                best_program, gate, return_rows=True,
+                per_query_timeout_s=self.cfg.search_timeout_s)
+        except Exception as e:
+            print(f"[campaign] recap scoring skipped ({type(e).__name__}: {e})")
+            return
+        recap = sub.eval_log_rows(rows, candidate_sha=best_program.sha[:8])
+        tracker.log_table(recap, artifact_file="recap/best_recap.json")
+        import json as _json
+        path = os.path.join(run_dir, "best_recap.json")
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(recap, f, ensure_ascii=False, indent=1)
+        n_hit = sum(r["retrieval_hit"] for r in recap)
+        n_ob = sum(r["openbook_correct"] for r in recap)
+        print(f"[campaign] recap: {len(recap)} questions, retrieval_hit={n_hit}, "
+              f"openbook_correct={n_ob} -> {path}")
 
     def stage0(self, campaign="stage0"):
         """Headroom check: score the seed, then ONE one-shot rewrite (no loop)."""

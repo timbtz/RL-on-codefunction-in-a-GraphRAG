@@ -353,6 +353,12 @@ class FastLoop:
         temp+replace write is simpler and correct). RNG state is deliberately NOT
         stored: every draw in this loop is a per-step-seeded `random.Random(seed+step)`
         (no global stream), so resuming at the same step reproduces the same draws."""
+        if hasattr(best_prog, "overlay"):     # FileSet (graph_search target)
+            best_block = {"kind": "file_set", "artifact": best_prog.to_dict(),
+                          "metrics": best.to_dict() if best is not None else None}
+        else:                                 # SearchProgram (function target)
+            best_block = {"src": best_prog.src, "family": best_prog.family,
+                          "metrics": best.to_dict() if best is not None else None}
         blob = {
             "version": CHECKPOINT_VERSION,
             "config_hash": self._guard_hash(),
@@ -362,8 +368,7 @@ class FastLoop:
             "steps_run": steps_run,
             "stale": stale,
             "stop_stale_ctr": stop_stale_ctr,
-            "best": {"src": best_prog.src, "family": best_prog.family,
-                     "metrics": best.to_dict() if best is not None else None},
+            "best": best_block,
             "pool": pool.to_dict(),
         }
         atomic_write_json(self._checkpoint_path(run_dir), blob, indent=1)
@@ -433,6 +438,11 @@ class FastLoop:
             return f
 
         def _compiles(src):
+            # Pool-resume validate. On the graph_search path the artifact is a
+            # FileSet (NullSandbox.compile never raises), so it always loads; on
+            # the function path `src` is a source string the real Sandbox compiles.
+            if hasattr(src, "overlay"):
+                return True
             try:
                 self._sandbox.compile(src)
                 return True
@@ -451,9 +461,13 @@ class FastLoop:
         blob = self._load_checkpoint(run_dir) if bool(getattr(cfg, "resume", False)) else None
         if blob is not None:
             try:
-                best_prog = SearchProgram(
-                    blob["best"]["src"],
-                    family=blob["best"].get("family", seed_program.family))
+                if blob["best"].get("kind") == "file_set":
+                    from ..artifact.file_set import FileSet
+                    best_prog = FileSet.from_dict(blob["best"]["artifact"])
+                else:
+                    best_prog = SearchProgram(
+                        blob["best"]["src"],
+                        family=blob["best"].get("family", seed_program.family))
                 best_fn = self._sandbox.compile(best_prog.src)
                 fn_cache[best_prog.sha] = best_fn
                 pool = CandidatePool.from_dict(blob["pool"], validate=_compiles)

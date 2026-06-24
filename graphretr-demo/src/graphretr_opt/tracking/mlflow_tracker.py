@@ -118,6 +118,47 @@ class MlflowTracker:
     def log_artifact(self, path):
         mlflow.log_artifact(path)
 
+    def log_table(self, data, artifact_file):
+        """Render a per-question recap table inline in the run's
+        Artifacts/Evaluation tab (the fix for "we see virtually nothing in
+        MLflow"): the answerer's chosen vs gold, open/closed-book correctness, and
+        retrieval-hit, one row per question x accepted candidate.
+
+        `data` is a list-of-dicts (or a {col: [vals]} dict). Cardinality here is
+        gate_size x accepted-candidates -- safe at this scale (unlike the gated
+        per-OpenAI-call spans). Tracking must NEVER break the loop, so a failure
+        is swallowed (the _safe discipline)."""
+        try:
+            # mlflow.log_table wants a DataFrame or {col: [vals]}; the loop hands
+            # us a list-of-dicts (one per question), so coerce.
+            if isinstance(data, list):
+                import pandas as pd
+                data = pd.DataFrame(data)
+            mlflow.log_table(data=data, artifact_file=artifact_file)
+        except Exception as e:
+            print(f"[tracking] log_table skipped: {e}")
+
+    def log_dataset(self, path, context="eval", name=None):
+        """Record WHICH MCQ dataset.json (with content digest) a run scored
+        against, as an MLflow dataset input -- so each run is traceable to its
+        gold set. Reads the JSON into a pandas frame; degrades to a plain artifact
+        log if pandas/mlflow.data is unavailable. Never fatal."""
+        try:
+            import json as _json
+
+            import pandas as pd
+            rows = _json.load(open(path, encoding="utf-8"))
+            df = pd.DataFrame(rows)
+            ds = mlflow.data.from_pandas(
+                df, source=path, name=name or os.path.basename(path))
+            mlflow.log_input(ds, context=context)
+        except Exception as e:
+            print(f"[tracking] log_dataset falling back to artifact ({e})")
+            try:
+                mlflow.log_artifact(path)
+            except Exception as e2:
+                print(f"[tracking] log_dataset artifact fallback skipped: {e2}")
+
     def end(self):
         if self._run is not None:
             mlflow.end_run()

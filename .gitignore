@@ -7,3 +7,7 @@ graphretr-demo/emb_cache.npy
 META/
 Research/
 wiki
+graphsearch/data
+neo4j
+worker_stderr.txt
+.venv

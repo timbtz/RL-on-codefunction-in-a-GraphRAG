@@ -30,7 +30,16 @@ behavior (caller compiles/probes after propose returns) is byte-identical.
 from ..agents.single import AgentUnavailable
 from ..artifact.program import SearchProgram
 from ..env.sandbox import SandboxError
-from .edits import EditError, apply_edits, extract_code, parse_edit_blocks
+from .edits import (EditError, apply_edits, apply_edits_multi, extract_code,
+                    parse_edit_blocks, parse_edit_blocks_multi)
+
+
+def _is_fileset(program):
+    """Duck-type the artifact kind: a FileSet carries an `overlay` dict, a
+    SearchProgram carries a single `src`. Keeping the switch structural (not an
+    isinstance on a concrete class) mirrors how the loop duck-types Substrate /
+    RewardModel -- the mutator never imports FileSet."""
+    return hasattr(program, "overlay")
 
 
 def _fmt_metrics(m):
@@ -135,6 +144,65 @@ fix the SCORING, not the recall. Gold answer sets often contain MANY nodes \
 """
 
 
+def build_search_prompt(file_set, primitives_doc, digest, max_edits):
+    """Edit prompt for the `graph_search` target -- the real agentic search
+    service file(s), not a sandboxed `def search(q, G)`. Renders each editable
+    file under a `FILE:` header (the same header the multi-file applier reads
+    back) so the model edits whole real source. No AST execution contract: the
+    only contract is "the edited service still imports and `search(query) -> str`
+    returns retrieved context" -- enforced by the subprocess eval seam, not a
+    gate. `primitives_doc` here is a short domain note (Neo4j schema / cost
+    levers), not a `G.*` API."""
+    files_block = "\n\n".join(
+        f"FILE: {rel}\n```python\n{file_set.overlay[rel]}```"
+        for rel in file_set.editable if rel in file_set.overlay)
+    return f"""\
+You are optimizing a REAL agentic graph-retrieval service for a German company \
+knowledge graph (Neo4j fulltext + recursive traversal, no embeddings). Given a \
+natural-language query, `search(query) -> str` returns a retrieved-context \
+string with [doc:ID] citations. A separate, FROZEN answerer then picks a \
+multiple-choice answer from ONLY that context. You are scored on how often the \
+answerer is then correct (closed-book-adjusted) plus whether the gold source \
+document appears in your context -- minus cost (LLM calls / latency). So: surface \
+the RIGHT documents into the context; do not try to answer the question yourself.
+
+## Domain notes
+{primitives_doc}
+
+## Editable file(s) (the incumbent)
+{files_block}
+
+## How your change is evaluated
+- The edited file replaces the original inside a throwaway copy of the service,
+  which is imported and run over a gold Q&A set in an isolated subprocess.
+- A file that fails to import, crashes, or hangs scores as a crash for those
+  queries (the subprocess is killed on a wall-clock timeout). Prefer changes that
+  keep the service importable and the `search` signature intact.
+- Cheaper retrieval that keeps quality is rewarded (fewer LLM calls / lower
+  latency are cost axes).
+
+## Evidence (latest rollout -- per-question retrieval/answer outcomes)
+{digest}
+
+## Your task
+1. Diagnose in a few sentences WHY the answerer misses on these questions. Use the
+   per-question signal: a RETRIEVAL miss (the gold source is absent from the
+   returned context) needs broader/deeper traversal or better keyword extraction;
+   a REASONING miss (gold source WAS in context but the answer was still wrong)
+   usually means too much noise -- tighten relevance filtering or compression.
+2. Propose your change as up to {max_edits} SEARCH/REPLACE blocks. Each block:
+   FILE: <one of the editable relpaths above>
+   <<<<<<< SEARCH
+   <exact contiguous lines copied verbatim from that file>
+   =======
+   <the replacement lines>
+   >>>>>>> REPLACE
+   The SEARCH text must match that file EXACTLY and appear exactly once. The
+   FILE: header is required when more than one file is editable. Prefer small,
+   targeted edits; give a one-line rationale per block.
+"""
+
+
 class Mutator:
     def __init__(self, agent, primitives_doc, safe_builtins):
         self._agent = agent
@@ -161,6 +229,22 @@ class Mutator:
         except ValueError:
             return None, 0
         return cand, program.edit_distance(cand)
+
+    def _candidate_multi(self, file_set, resp):
+        """FileSet variant of `_candidate`. Apply FILE:-tagged SEARCH/REPLACE
+        blocks to the overlay. -> (FileSet, n_edits) or (None, 0). There is no
+        full-module fallback here: a whole-file rewrite is ambiguous across
+        several files, so an unparseable/unanchorable reply just skips the step
+        (the loop re-prompts via the base-attempt retry)."""
+        blocks = parse_edit_blocks_multi(resp)
+        if not blocks:
+            return None, 0
+        try:
+            new_overlay = apply_edits_multi(
+                file_set.overlay, blocks, editable=file_set.editable)
+        except EditError:
+            return None, 0
+        return file_set.with_overlay(new_overlay), len(blocks)
 
     def propose(self, program: SearchProgram, failures, wins, buffer_entries,
                 edit_budget, plateau=False, validate=None, repair_budget=0):
@@ -196,8 +280,12 @@ class Mutator:
         if digest is not evidence:
             transcript.append(f"# DIGEST (analyst)\n\n{digest}")
 
-        prompt = build_prompt(program.src, self._doc, digest, edit_budget,
-                              self._safe_builtins)
+        is_fs = _is_fileset(program)
+        if is_fs:
+            prompt = build_search_prompt(program, self._doc, digest, edit_budget)
+        else:
+            prompt = build_prompt(program.src, self._doc, digest, edit_budget,
+                                  self._safe_builtins)
         transcript.append(f"# PROMPT\n\n{prompt}")
         tier = "architect" if plateau else "editor"
         base_left = 2                       # parse + over-budget retries
@@ -214,7 +302,8 @@ class Mutator:
                 return _done(None, "agent")
             transcript.append(f"# RESPONSE ({tier}, attempt {attempt})\n\n{resp}")
 
-            cand, n_edits = self._candidate(program, resp)
+            cand, n_edits = (self._candidate_multi(program, resp) if is_fs
+                             else self._candidate(program, resp))
             if cand is None:
                 base_left -= 1
                 if base_left <= 0:
