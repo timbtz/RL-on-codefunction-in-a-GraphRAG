@@ -639,6 +639,29 @@ class FastLoop:
 
             with open(os.path.join(run_dir, f"reflection_{step:03d}.md"), "w") as f:
                 f.write(transcript)
+            # Live, per-step MLflow logging (MCQ/graph_search path): the incumbent
+            # version's per-question results (chosen vs gold, right/wrong,
+            # retrieval-hit) AND the synthesized mistake+fix transcript -- so the
+            # run shows "which version got which MCQ right and why" as it goes,
+            # not just one recap at the very end. `rows` is the incumbent re-score
+            # already computed above for reflection, so this is zero extra cost.
+            if rows and "chosen_idx" in (rows[0] or {}):
+                try:
+                    self._tracker.log_artifact(
+                        os.path.join(run_dir, f"reflection_{step:03d}.md"))
+                    recap = [{
+                        "step": step, "incumbent_sha": parent_sha[:8],
+                        "q_id": r.get("q_id"), "question": r.get("query"),
+                        "chosen_idx": r.get("chosen_idx"), "gold_idx": r.get("gold_idx"),
+                        "openbook_correct": int(bool(r.get("openbook_correct"))),
+                        "retrieval_hit": int(bool(r.get("retrieval_hit"))),
+                        "error": r.get("error"),
+                        "context_preview": (r.get("context_preview") or "")[:300],
+                    } for r in rows]
+                    self._tracker.log_table(
+                        recap, artifact_file=f"recap/step_{step:03d}_incumbent.json")
+                except Exception as e:
+                    print(f"[fast_loop] per-step recap log skipped: {e}")
             if cand is not None:
                 cand.save(os.path.join(run_dir, f"step_{step:03d}.py"))
 
