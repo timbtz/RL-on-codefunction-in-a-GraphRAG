@@ -82,6 +82,14 @@ class CandidatePool:
         loop's stop condition counts (A4: stale = steps adding no frontier
         member). A specialist admitted only on the instance-wise rule does NOT
         grow the frontier."""
+        # Hard-reject crashes BEFORE the Pareto test. A crashed candidate aborts
+        # early, so its cost axes are garbage-LOW (e.g. db_load drops because it
+        # never finished the DB work) -- on the cost-minimizing axes of dominates()
+        # that makes a mcq=0 crash "non-dominated", so it would slip onto the
+        # frontier and (worse) reset the stale counter via frontier_grew. A broken
+        # program is never a frontier member.
+        if getattr(metrics, "crashed", False):
+            return False, False
         if program.sha in self.shas():
             return False, False
         dominated = any(dominates(m.metrics, metrics) for m in self.members)

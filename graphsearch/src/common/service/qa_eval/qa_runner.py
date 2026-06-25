@@ -124,17 +124,98 @@ def _openai_compatible_kwargs():
             "extra_body": {"usage": {"include": True}}}
 
 
+class _CliMsg:
+    """Minimal AIMessage stand-in: the search service + McqReward only read
+    `.content`; the metering proxy probes `.usage_metadata`/`.response_metadata`
+    (absent for CLI -> 0 cost, which is correct: CLI bills the subscription)."""
+    def __init__(self, content):
+        self.content = content
+        self.usage_metadata = None
+        self.response_metadata = {}
+
+
+class ClaudeCliChat:
+    """Chat model that routes `.invoke()` through the authenticated Claude CLI
+    (`claude -p --model`), so in-search + answerer LLM calls bill the Claude
+    subscription instead of OpenRouter. Has a hard per-call subprocess timeout +
+    retries (a stalled call can't wedge the run). Raises on repeated failure /
+    rate-limit so the caller records it as a per-query miss."""
+    def __init__(self, model="claude-haiku-4-5", timeout_s=120, max_retries=2):
+        self.model = model
+        self.timeout_s = timeout_s
+        self.max_retries = max_retries
+
+    @staticmethod
+    def _strip_fences(s):
+        """Drop ```json ... ``` / ``` ... ``` markdown fences (Claude often wraps
+        JSON/code even when told not to) so `json.loads` on the result works."""
+        s = s.strip()
+        if s.startswith("```"):
+            lines = s.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            s = "\n".join(lines).strip()
+        return s
+
+    @staticmethod
+    def _to_prompt(messages):
+        if isinstance(messages, str):
+            return messages
+        parts = []
+        for m in messages:
+            if isinstance(m, dict):
+                role, content = m.get("role", "user"), m.get("content", "")
+            else:
+                role, content = getattr(m, "type", "user"), getattr(m, "content", "")
+            parts.append(content if role == "user" else f"[{role}]\n{content}")
+        return "\n\n".join(str(p) for p in parts)
+
+    # Reframe the Claude Code CLI as a plain completion engine -- otherwise it
+    # answers AS the coding agent ("this is Claude Code, not a GraphRAG
+    # interface...") and breaks the search's JSON/keyword prompts.
+    _SYS = ("You are a non-interactive text/JSON completion engine embedded in an "
+            "automated data pipeline. The message is a task from a retrieval "
+            "system. Follow it literally and output ONLY the exact requested "
+            "content (e.g. the JSON object, or the keyword list) -- no preamble, "
+            "no questions, no explanation, no markdown code fences. If asked for "
+            "JSON, output only valid JSON.")
+
+    def invoke(self, messages, *args, **kwargs):
+        import subprocess
+        prompt = self._to_prompt(messages)
+        last = "no attempt"
+        for _ in range(self.max_retries + 1):
+            try:
+                r = subprocess.run(
+                    ["claude", "-p", "--model", self.model,
+                     "--append-system-prompt", self._SYS],
+                    input=prompt, capture_output=True, text=True,
+                    timeout=self.timeout_s)
+                if r.returncode == 0 and r.stdout.strip():
+                    return _CliMsg(self._strip_fences(r.stdout))
+                last = f"rc={r.returncode}: {(r.stderr or r.stdout)[:200]}"
+            except subprocess.TimeoutExpired:
+                last = f"cli timeout >{self.timeout_s}s"
+        raise RuntimeError(f"claude CLI failed after {self.max_retries + 1} tries: {last}")
+
+
 def _build_chat_model(llm_cfg):
     """Construct the chat model from llm_cfg = {provider, model, temperature}.
     temperature is forced to 0 regardless of the cfg (reward stability)."""
     provider = (llm_cfg.get("provider") or "openai").lower()
     model = llm_cfg["model"]
+    if provider in ("claude_cli", "cli"):
+        return ClaudeCliChat(model=model,
+                             timeout_s=int(llm_cfg.get("timeout_s", 120) or 120))
     if provider in ("openai", "azure_openai"):
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=model, temperature=0, **_openai_compatible_kwargs())
+        return ChatOpenAI(model=model, temperature=0, request_timeout=60,
+                          max_retries=2, **_openai_compatible_kwargs())
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=model, temperature=0)
+        return ChatAnthropic(model=model, temperature=0, timeout=60, max_retries=2)
     raise ValueError(f"unknown llm provider {provider!r}")
 
 

@@ -65,7 +65,7 @@ probe_timeout_s: 10.0
 crash_frac_limit: 0.10
 
 # mutator
-mutator_agent: tiered   # single | tiered (Haiku analyst -> Sonnet editor -> Opus architect)
+mutator_agent: single   # single | tiered (Haiku analyst -> Sonnet editor -> Opus architect)
 mutator_backend: cli    # cli (claude -p) | sdk (anthropic client; needs API key)
 # explicit ids, NOT bare aliases: the CLI alias "opus" resolves to its newest (4.8);
 # we deliberately pin 4.7 (same $5/$25 price, 1M ctx). Haiku=high-Q, newest Sonnet.

@@ -31,13 +31,16 @@ _WORKER_MODULE = "graphretr_opt.env.targets._worker"
 
 class SubprocessSearchTarget:
     def __init__(self, neo4j_cfg, llm_cfg, opt_src_dir, service_relpath=None,
-                 service_kwargs=None, python_exe=None, tmp_root=None):
+                 service_kwargs=None, python_exe=None, tmp_root=None,
+                 query_concurrency=1):
         """neo4j_cfg / llm_cfg: passed through to the worker's build_service.
         opt_src_dir: the graphretr-demo `src` dir, put on the worker's PYTHONPATH
             so `python -m graphretr_opt...._worker` resolves.
         service_relpath: which editable target class the worker builds.
         python_exe: interpreter for the worker (default: this process's).
         tmp_root: parent dir for throwaway overlays (default: system temp).
+        query_concurrency: how many of this batch's queries the worker runs in
+            parallel (each on its own service+sink). 1 = sequential.
         """
         self._neo4j = neo4j_cfg
         self._llm = llm_cfg
@@ -46,6 +49,7 @@ class SubprocessSearchTarget:
         self._service_kwargs = service_kwargs or {}
         self._python = python_exe or sys.executable
         self._tmp_root = tmp_root
+        self._query_concurrency = max(1, int(query_concurrency or 1))
 
     def run(self, file_set, queries, timeout_s: float) -> dict:
         queries = list(queries)
@@ -60,6 +64,7 @@ class SubprocessSearchTarget:
                 "llm_cfg": self._llm,
                 "service_relpath": self._service_relpath,
                 "service_kwargs": self._service_kwargs,
+                "query_concurrency": self._query_concurrency,
             }
             return self._spawn(job, queries, timeout_s)
         finally:

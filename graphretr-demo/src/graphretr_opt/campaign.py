@@ -156,15 +156,28 @@ class Campaign:
             print("[campaign] graph_search: FakeSearchTarget (offline, no infra)")
         else:
             from .env.targets.subprocess_target import SubprocessSearchTarget
+            # CLI-only runs: route in-search calls through the Claude CLI and
+            # SHRINK the search's per-eval call volume so an eval can finish within
+            # subscription rate limits (the full-fidelity ~60 calls/query would hit
+            # limits mid-eval). Fewer frontier nodes/depth/workers = far fewer CLI
+            # calls; also lower max_workers so we don't fire 20 concurrent `claude`.
+            svc_kwargs = {}
+            if cfg.search_provider.lower() in ("claude_cli", "cli"):
+                svc_kwargs = {"max_frontier": 4, "max_depth": 1,
+                              "docs_per_entity": 8, "neighbor_limit": 10,
+                              "max_workers": 3}
             target = SubprocessSearchTarget(
                 neo4j_cfg={"url": cfg.neo4j_url, "username": cfg.neo4j_user,
                            "password": cfg.neo4j_password,
                            "database": cfg.neo4j_database},
                 llm_cfg={"provider": cfg.search_provider, "model": cfg.search_model},
                 opt_src_dir=cfg.opt_src_abs,
-                service_relpath=cfg.editable_files[0] if cfg.editable_files else None)
+                service_relpath=cfg.editable_files[0] if cfg.editable_files else None,
+                service_kwargs=svc_kwargs or None,
+                query_concurrency=cfg.query_concurrency)
             print(f"[campaign] graph_search: SubprocessSearchTarget over "
-                  f"{cfg.graphsearch_src_abs}")
+                  f"{cfg.graphsearch_src_abs} (provider={cfg.search_provider}, "
+                  f"query_concurrency={cfg.query_concurrency}, svc_kwargs={svc_kwargs})")
 
         mcq = McqReward(answerer, crash_frac_limit=cfg.crash_frac_limit)
         self.search_reward = McqRewardAdapter(
@@ -193,8 +206,15 @@ class Campaign:
                                        and cfg.meta_holdout_size < n) else 0
         if mh and (n - mh) < 1:
             mh = 0
-        mb = cfg.minibatch_size if (cfg.minibatch_size
-                                    and cfg.minibatch_size < n) else 0
+        # Cheap pre-screen: score a candidate on a small REPRESENTATIVE subsample
+        # first; only candidates that hold up pay for the full gate. Representative
+        # (not failures-only) so the screen stays cost-aware AND catches
+        # regressions on previously-passing questions -- a failures-only screen
+        # would wrongly kill cheaper-same-accuracy wins and miss breakage.
+        # MUST be well below the full gate (~half): a candidate that PASSES the
+        # screen then pays the full gate too, so b≈gate would add cost, not save
+        # it. Ignore the STaRK default (large); size from the MCQ set instead.
+        mb = max(1, n // 2)
         return replace(
             cfg,
             gate_metric="mcq_accuracy",
@@ -231,6 +251,13 @@ class Campaign:
         if cfg.fake_target and not has_key:
             return StubAnswerer()
         provider = cfg.answerer_provider.lower()
+        if provider in ("claude_cli", "cli"):
+            # Route the MCQ answerer through the Claude CLI (subscription) too.
+            import sys
+            if cfg.graphsearch_src_abs not in sys.path:
+                sys.path.insert(0, cfg.graphsearch_src_abs)
+            from common.service.qa_eval.qa_runner import ClaudeCliChat
+            return ClaudeCliChat(model=cfg.answerer_model)
         if provider in ("openai", "azure_openai"):
             from langchain_openai import ChatOpenAI
             # Route through OpenRouter (OpenAI-compatible) when configured.

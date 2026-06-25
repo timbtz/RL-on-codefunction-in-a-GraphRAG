@@ -122,9 +122,13 @@ def _answerer_cost(res) -> dict:
 
 
 class McqReward:
-    def __init__(self, answerer_llm, crash_frac_limit=0.10):
+    def __init__(self, answerer_llm, crash_frac_limit=0.10, answer_concurrency=8):
         self._answerer = answerer_llm          # injected BaseChatModel (mock in tests)
         self._crash_limit = crash_frac_limit
+        # The answerer calls are independent (one MCQ each) and read cost off
+        # their own response -> no shared sink -> safe to fan out. Light calls, so
+        # cap modestly; the OpenRouter key handles >>this (see graphsearch/.env).
+        self._answer_concurrency = max(1, int(answer_concurrency or 1))
 
     # ------------------------------------------------------------------ #
     def _answer(self, context, question, choices):
@@ -165,11 +169,10 @@ class McqReward:
         queries = [q for q, _, _ in examples]
         results = target.run(file_set, queries, timeout_s)
 
-        rows = []
-        crashed = 0
-        lat_sum = llm_sum = db_sum = 0.0
-        usd_sum = tin_sum = tout_sum = 0.0
-        for (question, q_id, gold), idx in zip(examples, idxs):
+        # Answer each MCQ. The answerer calls are independent (no shared state),
+        # so fan them out -- preserving input order -- and accumulate after.
+        def _answer_one(pair):
+            (question, q_id, gold), idx = pair
             res = results.get(question)
             error = getattr(res, "error", None) if res is not None else "no result"
             context = getattr(res, "context", "") if res is not None else ""
@@ -178,26 +181,42 @@ class McqReward:
                    "gold_idx": gold["answer_idx"],
                    "closedbook_correct": bool(gold["closedbook_correct"]),
                    "error": error}
-
             t_ans = time.time()
             ans_cost = {"usd": 0.0, "tokens_in": 0, "tokens_out": 0}
+            is_crash = False
             if error or not context:
                 # crash / empty context -> answerer not even called; scored a miss
                 if error:
-                    crashed += 1
+                    is_crash = True
                 chosen = len(gold["choices"]) - 1   # cannot-determine
                 openbook = False
             else:
                 chosen, _raw, ans_cost = self._answer(context, question, gold["choices"])
                 openbook = (chosen == gold["answer_idx"])
             ans_secs = time.time() - t_ans
-
             row["chosen_idx"] = chosen
             row["openbook_correct"] = bool(openbook)
             row["retrieval_hit"] = self._retrieval_hit(gold.get("source"), context)
             row["context_preview"] = (context or "")[:300]
-            rows.append(row)
+            return row, cost, ans_cost, ans_secs, is_crash
 
+        pairs = list(zip(examples, idxs))
+        ac = max(1, min(len(pairs), self._answer_concurrency))
+        if ac <= 1:
+            processed = [_answer_one(p) for p in pairs]
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=ac) as ex:
+                processed = list(ex.map(_answer_one, pairs))   # map preserves order
+
+        rows = []
+        crashed = 0
+        lat_sum = llm_sum = db_sum = 0.0
+        usd_sum = tin_sum = tout_sum = 0.0
+        for row, cost, ans_cost, ans_secs, is_crash in processed:
+            if is_crash:
+                crashed += 1
+            rows.append(row)
             if cost is not None:
                 lat_sum += cost.latency_s + ans_secs
                 # +1 llm call for the answerer's selection

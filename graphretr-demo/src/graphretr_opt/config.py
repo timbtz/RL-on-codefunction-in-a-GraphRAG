@@ -121,10 +121,16 @@ class Config:
     search_model: str = "gpt-4o-mini"
     answerer_provider: str = "openai"
     answerer_model: str = "gpt-4o-mini"
-    search_timeout_s: float = 900.0        # subprocess wall-clock kill per gate BATCH
-    # (one subprocess runs ALL gate queries sequentially; the real agentic search
-    # makes tens of LLM calls per query, so ~11 queries needs minutes, not 120s)
+    search_timeout_s: float = 1800.0       # subprocess wall-clock kill per gate BATCH
+    # (one subprocess runs the gate queries, up to query_concurrency in parallel;
+    # the real agentic search makes tens of LLM calls per query, so the batch needs
+    # minutes, not 120s -- generous ceiling, it's a kill switch not a delay)
     eval_concurrency: int = 2              # cap concurrent candidate subprocesses (Neo4j/API)
+    query_concurrency: int = 3             # graph_search: gate queries run IN PARALLEL inside
+    # one worker (each is an independent, read-only search+answer -> embarrassingly
+    # parallel). conc=3 -> ~90-120 peak concurrent OpenRouter calls (measured safe,
+    # see graphsearch/.env). 1 = old sequential behaviour. Cuts the seed gate from
+    # ~11x(search+answer) sequential to ceil(11/conc) waves.
     # Cost-aware gate (graph_search): the gate admits on a blended composite
     #   composite = mcq_accuracy - search_cost_weight * usd_cost
     # where usd_cost is the REAL mean OpenRouter $/query (search + answerer). This
@@ -219,6 +225,10 @@ def load_config(**overrides) -> Config:
         "neo4j_database": os.environ.get("GRAPHSEARCH_NEO4J_DATABASE"),
         "answerer_model": os.environ.get("ANSWERER_MODEL"),
         "search_model": os.environ.get("SEARCH_MODEL"),
+        "search_provider": os.environ.get("SEARCH_PROVIDER"),
+        "answerer_provider": os.environ.get("ANSWERER_PROVIDER"),
+        "query_concurrency": (int(os.environ["QUERY_CONCURRENCY"])
+                              if os.environ.get("QUERY_CONCURRENCY") else None),
         "search_cost_weight": (float(os.environ["SEARCH_COST_WEIGHT"])
                                if os.environ.get("SEARCH_COST_WEIGHT") else None),
         "fake_target": True if os.environ.get("GRAPHRETR_FAKE_TARGET") == "1" else None,

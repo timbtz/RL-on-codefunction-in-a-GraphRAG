@@ -63,6 +63,11 @@ class FastLoop:
         self._edit_budget = edit_budget
         self._tracker = tracker
         self._budget = budget  # OpenAIBudget (or None); per-step cost attribution
+        # graph_search: per-question rows from a program's last full-gate score,
+        # keyed by sha. Lets the reflection step reuse the incumbent's already-
+        # computed per-question results instead of re-running the (unchanged,
+        # deterministic) incumbent -- removing one full agentic eval per step.
+        self._rows_by_sha = {}
         blend = {}
         for part in str(getattr(cfg, "gate_blend", "") or "").split(","):
             if ":" in part:
@@ -165,8 +170,17 @@ class FastLoop:
         s = cache.get(ckey)
         if s is not None:
             return s, True, time.time() - t
-        s = self._reward.score(cand_fn, gate_idxs, src=cand.src,
-                               per_query_timeout_s=self._cfg.probe_timeout_s)
+        if getattr(self._cfg, "target", None) == "graph_search":
+            # Capture per-question rows (the reward computes them regardless, so
+            # this is free) and stash them so the next step's reflection can reuse
+            # this program's results instead of re-scoring it.
+            s, rows = self._reward.score(
+                cand_fn, gate_idxs, src=cand.src, return_rows=True,
+                per_query_timeout_s=self._cfg.probe_timeout_s)
+            self._rows_by_sha[cand.sha] = rows
+        else:
+            s = self._reward.score(cand_fn, gate_idxs, src=cand.src,
+                                   per_query_timeout_s=self._cfg.probe_timeout_s)
         cache.put(ckey, s)
         return s, False, time.time() - t
 
@@ -600,11 +614,23 @@ class FastLoop:
             parent_sha = parent_prog.sha
             parent_fn = _get_fn(parent_prog)
 
-            ridxs = random.Random(cfg.gate_seed + step).sample(
-                substrate.train_idxs, cfg.rollout_batch)
-            _, rows = self._reward.score(parent_fn, ridxs, src=parent_prog.src,
-                                         return_rows=True,
-                                         per_query_timeout_s=cfg.probe_timeout_s)
+            # Reuse the incumbent's already-computed per-question rows when we have
+            # them (graph_search): the parent is unchanged and the search is
+            # deterministic (temperature=0), so re-running it just to re-derive its
+            # failures wastes a full agentic eval. Fall back to a one-off re-score
+            # only when uncached (e.g. the seed on the very first step).
+            reuse = (getattr(cfg, "target", None) == "graph_search"
+                     and self._rows_by_sha.get(parent_sha) is not None)
+            if reuse:
+                rows = self._rows_by_sha[parent_sha]
+            else:
+                ridxs = random.Random(cfg.gate_seed + step).sample(
+                    substrate.train_idxs, cfg.rollout_batch)
+                _, rows = self._reward.score(parent_fn, ridxs, src=parent_prog.src,
+                                             return_rows=True,
+                                             per_query_timeout_s=cfg.probe_timeout_s)
+                if getattr(cfg, "target", None) == "graph_search":
+                    self._rows_by_sha[parent_sha] = rows
             fails, wins = self._reflect(rows, cfg.reflect_top)
 
             L_t = self._edit_budget.L_t(step)
