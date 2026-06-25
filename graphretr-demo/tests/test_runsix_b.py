@@ -36,7 +36,12 @@ class _MBReward:
     marker, so the minibatch comparison is deterministic and DB-free."""
 
     def score(self, fn, idxs, src=None, return_rows=False, per_query_timeout_s=None):
-        r = 0.6 if "CAND_BETTER" in (src or "") else 0.4
+        s = src or ""
+        # PARENT=0.4; BETTER above it; WORSE clearly below the eps band (1/20=0.05
+        # at b=20) so it is screened. A mere tie is promoted by design now
+        # (post-mortem #4: the screen is `>= best - eps`, not strict `>`), so WORSE
+        # must be genuinely lower, not equal to the parent.
+        r = 0.6 if "CAND_BETTER" in s else (0.2 if "CAND_WORSE" in s else 0.4)
         return MetricVector(quality={"recall@20": r, "hit@1": 0.0,
                                      "hit@5": 0.0, "mrr": r})
 

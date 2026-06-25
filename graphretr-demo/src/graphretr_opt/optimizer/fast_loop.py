@@ -612,7 +612,8 @@ class FastLoop:
                 cand, transcript, meta = self._mutator.propose(
                     parent_prog, fails, wins, buffer.recent(), L_t,
                     plateau=plateau, validate=_validate,
-                    repair_budget=int(getattr(cfg, "repair_budget", 0) or 0))
+                    repair_budget=int(getattr(cfg, "repair_budget", 0) or 0),
+                    accepted_entries=buffer.accepted())
             except AgentUnavailable as e:
                 # CLI limits reached: stop the campaign here, keep the incumbent
                 # as best, and fall through to the normal save-and-return path so
@@ -711,6 +712,16 @@ class FastLoop:
                     delta = "no gate score"
                 gist = parent_prog.change_summary(cand) if cand else "(no candidate)"
                 buffer.add(step, f"{gist} => {delta}; {reason}")
+                buffer.save(buf_path)
+            elif cand is not None:
+                # positive memory (run-7/8 mode-collapse fix): remember WHAT
+                # improved / got admitted so the proposer builds on winning ideas,
+                # not just avoids dead ends.
+                d = (f"recall@20 {s.get('recall@20'):.3f}, mrr {s.get('mrr'):.3f}"
+                     if s is not None else "admitted")
+                buffer.add(step,
+                           f"{parent_prog.change_summary(cand)} => {d}; {reason}",
+                           outcome="accept")
                 buffer.save(buf_path)
 
             # per-step cost split (Phase B): OpenAI spend delta, accept-vs-reject,
@@ -859,11 +870,11 @@ class FastLoop:
         print(f"[fast_loop] done. best: { {k: round(best.get(k), 4) for k in QUALITY_KEYS} }")
         return ArmResult(best_prog.family, best_prog, best, run_dir)
 
-    def _minibatch_eps(self, mb_size):
+    def _minibatch_eps(self, mb_size, cfg):
         """Tolerance band for the pre-screen. `minibatch_eps` if set, else 1/b
         (~0.05 at b=20) -- one query's worth of the subsample, the smallest
         meaningful resolution on a b-query draw (post-mortem #4)."""
-        return (float(getattr(self._cfg, "minibatch_eps", 0.0) or 0.0)
+        return (float(getattr(cfg, "minibatch_eps", 0.0) or 0.0)
                 or (1.0 / mb_size if mb_size else 0.0))
 
     def _minibatch_ok(self, cache, best_prog, best_fn, cand, cand_fn,
@@ -894,4 +905,4 @@ class FastLoop:
         c_mb = self._reward.score(cand_fn, mb_idxs, src=cand.src,
                                   per_query_timeout_s=cfg.probe_timeout_s)
         cache.put(f"mb:{cand.sha}@{gate_tag}", c_mb)
-        return self._gate_value(c_mb) >= self._gate_value(b_mb) - self._minibatch_eps(mb_size)
+        return self._gate_value(c_mb) >= self._gate_value(b_mb) - self._minibatch_eps(mb_size, cfg)

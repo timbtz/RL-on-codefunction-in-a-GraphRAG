@@ -20,11 +20,34 @@ class RejectedBuffer:
         self.entries = []
         self.context_n = context_n
 
-    def add(self, step, summary):
-        self.entries.append({"step": step, "summary": summary})
+    def add(self, step, summary, outcome="reject"):
+        self.entries.append({"step": step, "summary": summary, "outcome": outcome})
+
+    def _recent(self, outcome, n):
+        """Most-recent-first then re-chronological, DEDUPED by normalized summary,
+        the last `n` entries of the given outcome. Dedup is the mode-collapse fix
+        (run7/8): a dead OR winning idea is shown once, and old distinct ideas are
+        not crowded out by the proposer re-submitting the same edit every step."""
+        seen, out = set(), []
+        for e in reversed(self.entries):
+            if e.get("outcome", "reject") != outcome:
+                continue
+            key = " ".join(str(e.get("summary", "")).split()).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(e)
+            if len(out) >= n:
+                break
+        return list(reversed(out))
 
     def recent(self):
-        return self.entries[-self.context_n:]
+        """Deduped recent REJECTED edits -- negative replay ('do not repeat')."""
+        return self._recent("reject", self.context_n)
+
+    def accepted(self):
+        """Deduped recent ACCEPTED edits -- positive replay ('build on these')."""
+        return self._recent("accept", self.context_n)
 
     def load(self, path):
         try:

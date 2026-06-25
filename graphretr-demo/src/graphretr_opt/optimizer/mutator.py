@@ -75,24 +75,48 @@ def _format_buffer(entries):
     return "\n".join(f"- step {e['step']}: {e['summary']}" for e in entries)
 
 
-def format_evidence(failures, wins, buffer_entries):
+def format_evidence(failures, wins, buffer_entries, accepted_entries=None):
     """The rollout evidence block -- what agent.digest() compresses."""
+    won = ""
+    if accepted_entries:
+        won = ("## Edits that IMPROVED the metric so far -- build on these, do not undo them\n"
+               + _format_buffer(accepted_entries) + "\n\n")
     return f"""## Worst failures from the latest rollout (train queries)
 {_format_failures(failures)}
 
-{_format_wins(wins)}## Previously rejected edits (did NOT improve the gate -- do not repeat)
+{_format_wins(wins)}{won}## Previously rejected edits (did NOT improve the gate -- do not repeat)
 {_format_buffer(buffer_entries)}"""
 
 
-def build_prompt(incumbent_src, primitives_doc, digest, max_edits, safe_builtins):
+def build_prompt(incumbent_src, primitives_doc, digest, max_edits, safe_builtins,
+                 plateau=False):
+    stance = (
+        "You have STALLED for several steps -- small tweaks are not working. Make "
+        "a BOLD, STRUCTURAL change this step: rewrite an operator end-to-end, "
+        "replace the retrieval strategy, or add a new graph/hybrid recall path. Do "
+        "NOT just retune constants or thresholds. A wholesale rewrite (end with the "
+        "COMPLETE module in one ```python block) is encouraged here."
+        if plateau else
+        "Prefer focused edits, but rewrite a whole operator -- its Cypher or its "
+        "LLM prompt -- whenever that is what moves the metric. You are NOT limited "
+        "to small tweaks.")
     return f"""\
 You are optimizing a Python retrieval program for STaRK-prime, a biomedical \
 knowledge-graph QA benchmark. Given a natural-language query, the program must \
 return candidate node ids ranked by relevance. The gate optimizes a blend of \
-recall@20 (gold anywhere in top-20) AND ranking quality (hit@1 / MRR). Ranking \
-is the current weakness: when gold IS retrieved but ranked below non-gold nodes, \
-fix the SCORING, not the recall. Gold answer sets often contain MANY nodes \
-(median ~10), of any node type.
+recall@20 (gold anywhere in top-20) AND ranking quality (hit@1 / MRR). Gold \
+answer sets often contain MANY nodes (median ~10), of any node type.
+
+You OWN THE ENTIRE PIPELINE. The retrieval, extraction and re-ranking operators \
+are ordinary helper functions in the program below, built on three raw primitives \
+(G.query read-only Cypher, G.embed, G.llm). You may rewrite their Cypher, rewrite \
+their LLM prompts, change the fusion math, or add brand-new operators. BOTH \
+failure modes are in scope: if gold is NOT in the pool at all (GENERATION/recall \
+failure), write better or different retrieval -- hybrid text+vector fusion, or a \
+GRAPH walk (k-hop / shortest_path between the query's entities via G.query) that \
+reaches gold the embeddings miss; if gold IS in the pool but ranked low (RANKING \
+failure), fix the scoring / rerank prompt. Do NOT assume the stock embedding \
+retrieval is good enough -- it often is not.
 
 ## Current program (the incumbent)
 ```python
@@ -117,21 +141,22 @@ fix the SCORING, not the recall. Gold answer sets often contain MANY nodes \
 ## Your task
 1. Diagnose in a few sentences WHY the incumbent misses or mis-ranks these gold
    nodes (look at what the missed/out-ranking node texts share and which
-   primitives could reach or re-rank them). ATTRIBUTE each failure using its
-   `->` tag: a RANKING failure (gold reachable in top-100 but not top-20) needs
-   a SCORING/rerank fix, NOT broader retrieval; a GENERATION failure (gold not
-   in top-100) needs broader or REFORMULATED retrieval, not more re-ranking.
-   Name the specific program element (which call/branch) responsible.
-2. Propose your change as up to {max_edits} SEARCH/REPLACE blocks. Each block:
+   operators/queries could reach or re-rank them). ATTRIBUTE each failure using
+   its `->` tag: a RANKING failure (gold in top-100 but not top-20) needs a
+   SCORING/rerank fix; a GENERATION failure (gold NOT in top-100) needs broader,
+   reformulated, or GRAPH-STRUCTURAL retrieval -- rewrite the retrieval operator
+   or add a G.query graph walk, do not just re-rank. Name the specific
+   helper/call responsible.
+2. Propose your change as SEARCH/REPLACE blocks (up to {max_edits}). Each block:
    <<<<<<< SEARCH
    <exact contiguous lines copied verbatim from the incumbent>
    =======
    <the replacement lines>
    >>>>>>> REPLACE
    The SEARCH text must match the incumbent EXACTLY and appear exactly once.
-   Prefer small, targeted edits. Give a one-line rationale per block.
-   (Only if a wholesale rewrite is unavoidable, you may instead end with the
-   COMPLETE module in ONE ```python block -- but edit blocks are preferred.)
+   {stance}
+   Give a one-line rationale per block. For a wholesale rewrite, end your reply
+   with the COMPLETE module in ONE ```python block instead.
 """
 
 
@@ -163,7 +188,8 @@ class Mutator:
         return cand, program.edit_distance(cand)
 
     def propose(self, program: SearchProgram, failures, wins, buffer_entries,
-                edit_budget, plateau=False, validate=None, repair_budget=0):
+                edit_budget, plateau=False, validate=None, repair_budget=0,
+                accepted_entries=None):
         """Propose an edit to `program` from the rollout evidence.
 
         -> (candidate SearchProgram or None, transcript:str, meta:dict) where
@@ -178,7 +204,7 @@ class Mutator:
             candidate and raises SandboxError on reject; its exact text is fed
             back for a targeted fix (compiler-in-the-loop self-repair).
         With validate=None / repair_budget=0 the validation arm never runs."""
-        evidence = format_evidence(failures, wins, buffer_entries)
+        evidence = format_evidence(failures, wins, buffer_entries, accepted_entries)
         transcript = [f"# EVIDENCE\n\n{evidence}"]
         meta = {"reject_reason": None, "probe_failed": 0}
 
@@ -196,8 +222,12 @@ class Mutator:
         if digest is not evidence:
             transcript.append(f"# DIGEST (analyst)\n\n{digest}")
 
-        prompt = build_prompt(program.src, self._doc, digest, edit_budget,
-                              self._safe_builtins)
+        # Bold mode on plateau: lift the edit budget so a wholesale restructure
+        # is not bounced as "over budget" (a full-module rewrite has a large edit
+        # distance), and tell the proposer to make a structural change.
+        eff_budget = 9999 if plateau else edit_budget
+        prompt = build_prompt(program.src, self._doc, digest, eff_budget,
+                              self._safe_builtins, plateau=plateau)
         transcript.append(f"# PROMPT\n\n{prompt}")
         tier = "architect" if plateau else "editor"
         base_left = 2                       # parse + over-budget retries
@@ -225,15 +255,15 @@ class Mutator:
                            "SEARCH/REPLACE block (the SEARCH text must match the "
                            "incumbent exactly) nor a ```python module. Reply again.")
                 continue
-            if n_edits > edit_budget:
+            if n_edits > eff_budget:
                 base_left -= 1
                 if base_left <= 0:
                     transcript.append("# SKIPPED: no in-budget candidate after "
                                       "2 base attempts")
                     return _done(None, "budget")
                 prompt += (f"\n\nYour previous candidate changed {n_edits} regions "
-                           f"but the budget is {edit_budget}. Keep your best "
-                           f"{edit_budget} edits and reply again.")
+                           f"but the budget is {eff_budget}. Keep your best "
+                           f"{eff_budget} edits and reply again.")
                 continue
             # Parsed and in budget. Validate (compile + probe) when asked, and
             # self-repair the exact sandbox/probe error in this same conversation.

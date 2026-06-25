@@ -27,6 +27,8 @@ from .cache import PrimitiveCache
 from .embedder import QueryEmbedder
 from . import primitives as P
 
+_MAX_QUERY_ROWS = 5000   # hard row cap on a raw G.query() result (runaway guard)
+
 _EXTRACT_SYSTEM = """\
 You are a query analyzer for a biomedical knowledge graph. Given one natural-
 language question, return ONLY a JSON object with these keys:
@@ -102,6 +104,8 @@ class RetrievalGraph:
         self._judge_mem = None        # lazy-loaded disk cache
         self._frontier_disk = os.path.join(cfg.runs_dir, "pick_frontier_cache.json")
         self._frontier_mem = None     # lazy-loaded disk cache
+        self._llm_disk = os.path.join(cfg.runs_dir, "llm_cache.json")  # open G.llm()
+        self._llm_mem = None          # lazy-loaded disk cache
 
         # One-time engine safety config (global to our container alone).
         backend.configure("TIMEOUT_MAX", 10_000)
@@ -128,6 +132,81 @@ class RetrievalGraph:
     def _pin_query(self, query):
         """Trusted-caller hook (Sandbox.run): the only text extract() accepts."""
         self._pinned_query = query
+
+    # ================================================================== floor
+    # The minimal TRUSTED capabilities a v7 program is built on: read-only
+    # Cypher, query embedding, and a metered+cached LLM call. The higher-level
+    # operators (vector_search, extract, llm_rerank, ...) are reimplemented ON
+    # TOP of these inside the editable seed, so the optimizer owns them. Only
+    # these three must stay fixed -- they are what enforce read-only access,
+    # cost metering and the budget ceiling. Everything above is strategy.
+
+    def query(self, cypher, params=None):
+        """Run ONE read-only Cypher query against the graph. -> list of result
+        rows (each row a plain list). Writes are rejected by the backend's
+        read-only path; a per-query timeout and a row cap bound runaway queries.
+        Cached in-memory by (cypher, params)."""
+        P.nonempty_str(cypher, "cypher")
+        params = params if isinstance(params, dict) else {}
+        key = ("query", cypher, json.dumps(params, sort_keys=True, default=str))
+        hit = self._cache.get(key)
+        if hit is not None:
+            return [list(r) for r in hit]
+        rows = self._ro(cypher, params)
+        out = [list(r) for r in rows][:_MAX_QUERY_ROWS]
+        return [list(r) for r in self._cache.put(key, out)]
+
+    def embed(self, text):
+        """Embed query text with the SAME model the nodes are indexed with.
+        -> list[float]. Pass as a vecf32($v) param to the vector index, or use
+        for custom similarity. Local embedder -- does not touch the LLM budget."""
+        P.nonempty_str(text, "text")
+        return self._embedder.encode(text).tolist()
+
+    def llm(self, system, user, context_ids=None, model=None, max_tokens=600):
+        """One metered, cached, JSON-mode LLM call -- the raw capability the
+        editable extract/rerank/judge/reformulate helpers are built on. `system`
+        and `user` are prompts the program writes itself. If `context_ids` is
+        given, each node's document is appended to `user` (deduped, capped at
+        rerank_pool_max, truncated) so the program needn't assemble context by
+        hand. -> parsed dict ({} on unparseable output; the program's prompt
+        defines the schema). Counts against the OpenAI budget ceiling; cached on
+        disk by (system, user, context, model)."""
+        P.nonempty_str(system, "system")
+        P.nonempty_str(user, "user")
+        if self._llm_budget is None:
+            raise ValueError("llm() is not enabled (no OPENAI_API_KEY)")
+        model = model or self._cfg.rerank_model
+        ctx_ids, seen = [], set()
+        if context_ids is not None:
+            for nid in P.ids_in(context_ids):
+                if nid not in seen and len(ctx_ids) < self._cfg.rerank_pool_max:
+                    seen.add(nid)
+                    ctx_ids.append(nid)
+        # cost meters: charge the call + the context the program asked for, so a
+        # program that floods G.llm with context shows a higher rerank_items cost.
+        self._llm_calls += 1
+        self._rerank_items = getattr(self, "_rerank_items", 0) + len(ctx_ids)
+        system, user = system[:4000], user[:6000]   # guard program-authored prompts
+        full_user = user
+        if ctx_ids:
+            texts = self.get_text(ctx_ids, limit=len(ctx_ids))
+            lines = "\n".join(f"[{nid}] {texts.get(nid, '')[:500]}" for nid in ctx_ids)
+            full_user = f"{user}\n\nNodes:\n{lines}"
+        if self._llm_mem is None:
+            self._llm_mem = (json.load(open(self._llm_disk))
+                             if os.path.exists(self._llm_disk) else {})
+        ckey = "\x00".join([model, system, full_user])
+        hit = self._llm_mem.get(ckey)
+        if hit is not None:
+            return json.loads(json.dumps(hit))
+        raw = self._llm_budget.chat_json(system, full_user, model=model,
+                                         max_tokens=max_tokens)
+        raw = raw if isinstance(raw, dict) else {}
+        self._llm_mem[ckey] = raw
+        os.makedirs(os.path.dirname(self._llm_disk), exist_ok=True)
+        json.dump(self._llm_mem, open(self._llm_disk, "w"))
+        return json.loads(json.dumps(raw))
 
     # -------------------------------------------------------------- primitives
 
@@ -596,6 +675,33 @@ capped (fan-out <= {cfg.max_fanout}, k-hop depth <= {cfg.max_k}), and each under
 has a {cfg.query_timeout_ms} ms timeout (a timeout raises -- catch nothing, just keep fan-out
 modest). Invalid arguments raise ValueError.
 
+== RAW FLOOR (the trusted primitives -- everything else is editable) ==
+The operators below (vector_search, extract, llm_rerank, ...) are NOT magic:
+in the v7 seed they are ordinary helper functions in YOUR program, built on
+three raw primitives. You may rewrite those helpers, change their Cypher and
+prompts, or add new ones -- whatever surfaces and ranks the gold.
+G.query(cypher, params=None) -> list[rows]   (each row a list)
+    Run ONE read-only Cypher query (writes are rejected by the engine; {cfg.query_timeout_ms} ms
+    timeout; <= {_MAX_QUERY_ROWS} rows). The node label is 'Entity'; nodes have .id (int),
+    .ntype (str), .text (str), .embedding (float[]); per-type vector indexes are
+    the labels below. Examples you can adapt:
+      vector ANN:  CALL db.idx.vector.queryNodes($label,'embedding',$k,vecf32($vec)) YIELD node,score RETURN node.id,score
+      full-text:   CALL db.idx.fulltext.queryNodes('Entity',$q) YIELD node,score RETURN node.id,score
+      k-hop BFS:   UNWIND $ids AS i MATCH (s:Entity {{id:i}}) CALL algo.bfs(s,2,null) YIELD nodes UNWIND nodes AS n RETURN DISTINCT n.id,n.ntype
+      neighbors:   UNWIND $ids AS i MATCH (a:Entity {{id:i}})-[r]->(b) RETURN a.id,type(r),b.id
+    Write your own traversals here when the stock retrieval can't reach the gold.
+G.embed(text) -> list[float]
+    Embed query text with the SAME model the nodes are indexed with. Pass as the
+    vecf32($vec) param to the vector index, or for custom similarity math.
+G.llm(system, user, context_ids=None, model=None, max_tokens=600) -> dict
+    One metered, cached, JSON-mode LLM call -- the raw capability extract /
+    llm_rerank / reformulate are built on. system+user are prompts YOU write;
+    the returned dict's schema is whatever your prompt asks for ({{}} if
+    unparseable). context_ids appends those nodes' docs to user automatically.
+    Edit these prompts to improve extraction/ranking; one billed call per unique
+    (system,user,context,model), cached.
+
+== CONVENIENCE OPERATORS (v7 ships these as editable helpers; rewrite freely) ==
 G.vector_search(text, k=20, label=None) -> list[(node_id:int, similarity:float)]
     ANN over node-text embeddings (cosine). similarity ~[0,1], sorted
     descending. label=None searches all 10 node-type labels and merges;

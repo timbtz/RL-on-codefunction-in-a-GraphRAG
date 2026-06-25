@@ -17,7 +17,8 @@ sys.path.insert(0, os.path.join(ROOT, "src"))
 from graphretr_opt.config import load_config
 from graphretr_opt.env.backends.falkordb import FalkorDBBackend
 from graphretr_opt.env.cache import PrimitiveCache
-from graphretr_opt.env.embedder import QueryEmbedder
+from graphretr_opt.env.embedder import make_embedder
+from graphretr_opt.env.openai_client import OpenAIBudget
 from graphretr_opt.env.retrieval_graph import RetrievalGraph
 from graphretr_opt.env.sandbox import Sandbox, SandboxError
 from graphretr_opt.artifact.program import SearchProgram
@@ -27,7 +28,18 @@ from graphretr_opt.optimizer.edit_budget import EditBudget
 
 cfg = load_config()
 backend = FalkorDBBackend(cfg.falkor_host, cfg.falkor_port, cfg.graph_name)
-G = RetrievalGraph(cfg, backend, PrimitiveCache(), QueryEmbedder())
+# Mirror campaign.py: use the SAME embedder the graph is indexed with (config
+# selects openai_small=1536-d vs minilm=384-d). A hardcoded QueryEmbedder() here
+# was 384-d and tripped "Vector dimension mismatch" against the 1536-d index.
+# openai_small needs a metered budget; build one when any key (OpenAI OR
+# OpenRouter) is present, else the minilm path stays key-free as before.
+budget = None
+if (os.environ.get("OPENAI_API_KEY") or os.environ.get("OPEN_ROUTER_API_KEY")
+        or os.environ.get("OPENROUTER_API_KEY")):
+    budget = OpenAIBudget(os.path.join(cfg.runs_dir, "openai_usage.json"),
+                          ceiling_usd=cfg.openai_budget_usd)
+G = RetrievalGraph(cfg, backend, PrimitiveCache(),
+                   make_embedder(cfg, budget), llm_budget=budget)
 sandbox = Sandbox(G, default_timeout_s=cfg.probe_timeout_s)
 checks = 0
 
