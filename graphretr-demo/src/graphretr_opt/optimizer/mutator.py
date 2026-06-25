@@ -29,7 +29,7 @@ behavior (caller compiles/probes after propose returns) is byte-identical.
 """
 from ..agents.single import AgentUnavailable
 from ..artifact.program import SearchProgram
-from ..env.sandbox import SandboxError
+from ..env.errors import SandboxError
 from .edits import (EditError, apply_edits, apply_edits_multi, extract_code,
                     parse_edit_blocks, parse_edit_blocks_multi)
 

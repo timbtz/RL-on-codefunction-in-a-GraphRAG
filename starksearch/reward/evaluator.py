@@ -8,8 +8,16 @@ diagnostics, never the gate).
 """
 import torch
 
-from ..env.sandbox import SandboxError
-from .objectives import MetricVector, QUALITY_KEYS, code_complexity
+from graphretr_opt.env.errors import SandboxError
+from graphretr_opt.reward.objectives import MetricVector, code_complexity
+
+# STaRK node-containment quality axes. STaRK-specific, so it lives WITH this
+# scorer (the carve-out, 2026-06-25) -- the engine's reward framework keeps only
+# the generic MetricVector + primary_key-driven dominance, not this key list.
+# recall@20 is the Pareto/'primary' axis; hit@5 is reported for rank movement the
+# binary hit@1 misses. Re-exported via starksearch.reward.__init__ for callers
+# (the STaRK campaign entrypoints) that print these axes.
+QUALITY_KEYS = ("recall@20", "hit@1", "hit@5", "mrr")
 
 
 class RewardModel:

@@ -28,14 +28,15 @@ from dataclasses import dataclass, field, asdict
 def _is_finite_number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
-# hit@5 added for the Hit@1 push: the leaderboard reports it and it shows rank
-# movement the binary hit@1 misses. recall@20 stays the Pareto/'primary' axis.
-QUALITY_KEYS = ("recall@20", "hit@1", "hit@5", "mrr")
-
 
 @dataclass
 class MetricVector:
-    quality: dict = field(default_factory=lambda: {k: 0.0 for k in QUALITY_KEYS})
+    # The quality axis NAMES are target-specific and owned by the per-target
+    # reward (STaRK: starksearch.reward.QUALITY_KEYS; MCQ: qa_objectives.
+    # MCQ_QUALITY_KEYS). The framework stays agnostic: a bare vector starts with
+    # an empty quality dict and `primary` reads whichever axis `primary_key`
+    # names. The reward always constructs MetricVector with an explicit `quality`.
+    quality: dict = field(default_factory=dict)
     latency_s: float = 0.0
     db_load: float = 0.0
     llm_calls: float = 0.0

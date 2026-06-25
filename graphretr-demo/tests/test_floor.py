@@ -12,10 +12,10 @@ import os
 import tempfile
 
 from graphretr_opt.config import load_config
-from graphretr_opt.env.primitives import Allowlists
-from graphretr_opt.env.retrieval_graph import RetrievalGraph, _MAX_QUERY_ROWS
-from graphretr_opt.env.cache import PrimitiveCache
-from graphretr_opt.env.sandbox import check_source, compile_program
+from starksearch.primitives import Allowlists
+from starksearch.graph import RetrievalGraph, _MAX_QUERY_ROWS
+from starksearch.cache import PrimitiveCache
+from graphretr_opt.env.targets._worker_stark import _compile_candidate
 
 
 class _StubBudget:
@@ -118,9 +118,13 @@ def test_embed_returns_plain_list():
         assert v == [0.1, 0.2, 0.3] and isinstance(v, list)
 
 
-def test_v7_seed_is_sandbox_legal():
+def test_v7_seed_is_loadable():
+    # The AST gate is gone (carve-out 2026-06-25); candidates now run in a worker
+    # subprocess that exec's them with real builtins. The remaining contract is
+    # "loadable Python that defines a callable search" -- exactly what the worker's
+    # _compile_candidate enforces. (raises if the seed won't load / has no search.)
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     src = open(os.path.join(
-        root, "src/graphretr_opt/artifact/seeds/reasoning_first_v7.py")).read()
-    check_source(src)        # raises SandboxError if illegal
-    compile_program(src)     # builds the search() callable
+        root, "../starksearch/seeds/reasoning_first_v7.py")).read()
+    fn = _compile_candidate(src)
+    assert callable(fn)

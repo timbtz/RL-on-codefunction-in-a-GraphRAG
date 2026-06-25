@@ -1,6 +1,6 @@
 # Strategy family "hybrid_rrf" -- dense + sparse fusion, no LLM.
 family: hybrid_rrf
-seed: src/graphretr_opt/artifact/seeds/hybrid_rrf.py
+seed: ../starksearch/seeds/hybrid_rrf.py
 notes: >
   Vector search and full-text (BM25-style) search fused by reciprocal-rank
   fusion, AutoRAG's hybrid_rrf analog. Cheap and deterministic; the control

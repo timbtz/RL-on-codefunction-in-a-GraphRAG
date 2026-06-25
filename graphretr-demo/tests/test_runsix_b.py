@@ -7,7 +7,7 @@ No FalkorDB / no network needed.
 """
 from graphretr_opt.artifact.program import SearchProgram
 from graphretr_opt.config import load_config
-from graphretr_opt.data.substrate import Substrate
+from starksearch.qa import Substrate
 from graphretr_opt.optimizer.fast_loop import FastLoop
 from graphretr_opt.optimizer.gate import Gate
 from graphretr_opt.reward.objectives import MetricVector

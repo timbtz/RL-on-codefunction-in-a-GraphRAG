@@ -9,7 +9,7 @@ from collections import Counter
 
 from graphretr_opt.agents.team import TieredCoder, _ANALYST
 from graphretr_opt.optimizer.mutator import Mutator
-from graphretr_opt.env.sandbox import SAFE_BUILTINS
+from graphretr_opt.env.errors import SAFE_BUILTINS
 
 
 def _check(name, cond):

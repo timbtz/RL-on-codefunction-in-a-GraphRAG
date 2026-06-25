@@ -8,13 +8,15 @@ directly, not imported, because it is a standalone offline script:
     .venv/bin/python etl_prime.py        # safe to re-run; skips if graph full
 
 This module is the curated-layout pointer to it; `main()` execs that script so
-`python -m graphretr_opt.data.loader_etl` also works.
+`python -m starksearch.qa.loader_etl` also works.
 """
 import os
 import runpy
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-ETL_SCRIPT = os.path.join(ROOT, "etl_prime.py")
+# This file lives at <repo-root>/starksearch/qa/loader_etl.py; etl_prime.py lives
+# in the optimizer checkout at <repo-root>/graphretr-demo/etl_prime.py.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ETL_SCRIPT = os.path.join(REPO_ROOT, "graphretr-demo", "etl_prime.py")
 
 
 def main():

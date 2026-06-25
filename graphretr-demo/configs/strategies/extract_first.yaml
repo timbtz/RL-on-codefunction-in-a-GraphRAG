@@ -1,6 +1,6 @@
 # Strategy family "extract_first" -- the Phase-2 principled arm.
 family: extract_first
-seed: src/graphretr_opt/artifact/seeds/extract_first.py
+seed: ../starksearch/seeds/extract_first.py
 notes: >
   Query understanding via the fixed-prompt cached G.extract (LLM picks the
   answer type and likely relations from the live schema allowlists), then

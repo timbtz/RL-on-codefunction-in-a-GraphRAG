@@ -1,7 +1,7 @@
 graphretr-demo/.claude
 # Large embedding cache
 graphretr-demo/emb_cache.npy
-.claude
+.claude/
 # Agent / planning / meta scratch — not part of the program
 .agents/
 META/

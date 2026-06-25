@@ -5,7 +5,7 @@
 # optimizer owns the Cypher, the prompts, the fusion math and can add/replace
 # operators -- so the recall ceiling (gold not surfaced) is finally in scope.
 family: reasoning_first_v7
-seed: src/graphretr_opt/artifact/seeds/reasoning_first_v7.py
+seed: ../starksearch/seeds/reasoning_first_v7.py
 notes: >
   Editable operators on three trusted primitives: G.query (read-only Cypher),
   G.embed (query embedding), G.llm (metered+cached JSON call). The seed ships

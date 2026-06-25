@@ -11,7 +11,7 @@ import tempfile
 
 from graphretr_opt.config import load_config
 from graphretr_opt.env.openai_client import OpenAIBudget, BudgetExceeded
-from graphretr_opt.env.sandbox import check_source
+from graphretr_opt.env.targets._worker_stark import _compile_candidate
 from graphretr_opt.optimizer.gate import Gate
 from graphretr_opt.reward.objectives import code_complexity
 
@@ -78,8 +78,8 @@ class _StubBudget:
 
 def _make_graph(tmpdir, payload):
     """RetrievalGraph without a DB: bypass __init__, set only what extract needs."""
-    from graphretr_opt.env.retrieval_graph import RetrievalGraph
-    from graphretr_opt.env.primitives import Allowlists
+    from starksearch.graph import RetrievalGraph
+    from starksearch.primitives import Allowlists
     g = RetrievalGraph.__new__(RetrievalGraph)
     g._cfg = load_config(root=tmpdir)
     g._allow = Allowlists(
@@ -141,13 +141,13 @@ def test_extract():
         _check("extract: cache survives restart", g2._llm_budget.calls == 0)
 
 
-def test_seeds_pass_sandbox():
+def test_seeds_are_loadable():
     root = load_config().root
     for name in ("vector_only", "hybrid_rrf", "extract_first", "run1_best"):
-        path = os.path.join(root, "src/graphretr_opt/artifact/seeds", f"{name}.py")
+        path = os.path.join(root, "../starksearch/seeds", f"{name}.py")
         src = open(path).read()
-        check_source(src)  # raises on violation
-        _check(f"sandbox: seed {name} passes AST gate "
+        _compile_candidate(src)  # raises if not loadable / no search
+        _check(f"seed {name} loads (loosened subprocess exec) "
                f"(complexity {code_complexity(src):.0f})", True)
 
 
@@ -155,7 +155,7 @@ def main():
     test_budget()
     test_gate_complexity_cap()
     test_extract()
-    test_seeds_pass_sandbox()
+    test_seeds_are_loadable()
     print("\nall phase2 tests passed")
 
 

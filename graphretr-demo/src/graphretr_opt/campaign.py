@@ -1,10 +1,10 @@
 """Campaign -- the orchestrator. Owns all state and wires the two halves
 (env + optimizer) for the three entrypoints: stage0-probe, optimize, final-test.
 
-boot() assembles the immutable env (backend -> RetrievalGraph -> Sandbox) and
-the data/reward stack once; each entrypoint composes the optimizer pieces it
-needs on top. Stage-1 drives FastLoop directly and ignores SlowLoop/scheduler/
-gepa_adapter (all present as seams).
+boot() dispatches on cfg.target: the STaRK (function) path assembles the env
+(backend -> RetrievalGraph -> Sandbox) + data/reward stack in-process; the
+graph_search path assembles the subprocess SearchTarget stack. Each entrypoint
+composes the optimizer pieces it needs on top, driving FastLoop directly.
 """
 import os
 import random
@@ -12,8 +12,7 @@ import time
 from dataclasses import replace
 
 from .config import load_config, load_strategy, dump_resolved_config
-from .env.sandbox import SandboxError, SAFE_BUILTINS
-from .reward.objectives import QUALITY_KEYS
+from .env.errors import SandboxError, SAFE_BUILTINS
 from .artifact.program import SearchProgram
 from .agents.single import SingleCoder
 from .agents.team import TieredCoder
@@ -50,16 +49,33 @@ class Campaign:
     # --------------------------------------------------------------- bring-up
 
     def boot(self):
+        """The single bring-up entrypoint -- dispatch on `cfg.target` so ONE engine
+        drives both services. `graph_search` assembles the company-KG subprocess
+        stack (`boot_search`); anything else (`function`, the default) assembles
+        the in-process STaRK env. The CLI sets `cfg.target` per subcommand; the
+        engine reads it here instead of the caller picking boot vs boot_search."""
+        if self.cfg.target == "graph_search":
+            return self.boot_search()
+        return self._boot_function()
+
+    def _boot_function(self):
         cfg = self.cfg
+        # The STaRK service lives in the sibling `starksearch/` package (carved out
+        # of the engine 2026-06-25). Put the monorepo root on sys.path so it
+        # resolves, exactly as the graph_search path inserts graphsearch/src.
+        import sys
+        if cfg.repo_root not in sys.path:
+            sys.path.insert(0, cfg.repo_root)
         # function-campaign deps imported lazily (see module-top note)
-        from .data.substrate import Substrate
-        from .env.backends.falkordb import FalkorDBBackend
-        from .env.cache import PrimitiveCache
-        from .env.embedder import make_embedder
+        from starksearch.qa import Substrate
+        from starksearch.backends.falkordb import FalkorDBBackend
+        from starksearch.cache import PrimitiveCache
+        from starksearch.embedder import make_embedder
         from .env.openai_client import OpenAIBudget
-        from .env.retrieval_graph import RetrievalGraph
-        from .env.sandbox import Sandbox
-        from .reward.evaluator import RewardModel
+        from starksearch.graph import RetrievalGraph
+        from .env.null_sandbox import NullSandbox
+        from .env.targets.stark_subprocess_target import StarkSubprocessTarget
+        from starksearch.reward import StarkRewardAdapter
         backend = FalkorDBBackend(cfg.falkor_host, cfg.falkor_port, cfg.graph_name)
         # One shared metered OpenAI gateway for the embedder AND G.extract;
         # without a key both stay disabled and the minilm path works as before.
@@ -70,12 +86,29 @@ class Campaign:
             print(f"[campaign] openai budget: ${budget.spent_usd:.2f} spent of "
                   f"${cfg.openai_budget_usd:.2f} ceiling (embedder={cfg.embedder})")
         self.budget = budget  # shared OpenAI gateway; FastLoop reads it for per-step cost
+        # The in-process G is kept for the TRUSTED utilities the loop reads
+        # directly -- the mutator's primitives doc (G.describe) and the reflection
+        # node text (G.get_text). Candidate EXECUTION no longer runs in-process:
+        # the AST Sandbox is gone (deleted with the carve-out, 2026-06-25) and
+        # candidates are scored in a worker subprocess (StarkSubprocessTarget),
+        # exactly like graph_search. Isolation = the process boundary + wall-clock
+        # kill, not an in-process gate; the FalkorDB-protecting caps live in
+        # starksearch.primitives.
         self.graph = RetrievalGraph(cfg, backend, PrimitiveCache(),
                                     make_embedder(cfg, budget), llm_budget=budget)
-        self.sandbox = Sandbox(self.graph, default_timeout_s=cfg.probe_timeout_s)
+        self.sandbox = NullSandbox()  # no AST gate / in-process exec on this path
         self.substrate = Substrate(meta_holdout_size=cfg.meta_holdout_size,
                                    meta_seed=cfg.meta_seed)
-        self.reward = RewardModel(self.substrate, self.sandbox, cfg.crash_frac_limit)
+        target = StarkSubprocessTarget(
+            falkor_cfg={"host": cfg.falkor_host, "port": cfg.falkor_port,
+                        "graph_name": cfg.graph_name},
+            opt_src_dir=cfg.opt_src_abs, repo_root=cfg.repo_root,
+            # worker rebuilds G from campaign.yaml+env; pass root so it reads the
+            # SAME config + shares the runs_dir primitive caches.
+            cfg_overrides={"root": cfg.root})
+        self.reward = StarkRewardAdapter(self.substrate, target,
+                                         cfg.crash_frac_limit,
+                                         default_timeout_s=cfg.probe_timeout_s)
         return self
 
     def _make_mutator(self):
@@ -130,11 +163,16 @@ class Campaign:
         SearchTarget (fake or subprocess) + McqReward(Adapter) + FileSet seed +
         NullSandbox/NullGraph. No FalkorDB / RetrievalGraph / Sandbox / stark_qa /
         torch on this path -- the AST gate and G primitives are GONE here."""
-        from .data.qa_substrate import QaSubstrate
+        # The company service's qa + reward live in the sibling `graphsearch/`
+        # package (carved out 2026-06-25). Put the monorepo root on sys.path so
+        # `graphsearch.qa` / `graphsearch.reward` resolve, like the STaRK boot.
+        import sys
+        if self.cfg.repo_root not in sys.path:
+            sys.path.insert(0, self.cfg.repo_root)
+        from graphsearch.qa import QaSubstrate
         from .env.null_sandbox import NullGraph, NullSandbox
         from .env.targets.fake_target import FakeSearchTarget
-        from .reward.mcq_reward import McqReward, StubAnswerer
-        from .reward.mcq_reward_adapter import McqRewardAdapter
+        from graphsearch.reward import McqReward, StubAnswerer, McqRewardAdapter
         from .artifact.file_set import FileSet
         # campaign.yaml is tuned for STaRK (gate_size=1941, recall@20 gate,
         # complexity cap, large meta-holdout). The MCQ set is tiny and the metric
@@ -243,7 +281,7 @@ class Campaign:
         """The MCQ answerer (true-external dep; temperature=0). Falls back to the
         deterministic StubAnswerer when running the fake target with no API key
         (the offline smoke path)."""
-        from .reward.mcq_reward import StubAnswerer
+        from graphsearch.reward import StubAnswerer  # boot_search put repo_root on path
         cfg = self.cfg
         has_key = bool(os.environ.get("OPENAI_API_KEY")
                        or os.environ.get("ANTHROPIC_API_KEY")
@@ -348,6 +386,7 @@ class Campaign:
 
     def stage0(self, campaign="stage0"):
         """Headroom check: score the seed, then ONE one-shot rewrite (no loop)."""
+        from starksearch.reward import QUALITY_KEYS  # STaRK axes (boot() put it on path)
         cfg = self.cfg
         run_dir = os.path.join(cfg.runs_dir, campaign)
         os.makedirs(run_dir, exist_ok=True)
@@ -414,6 +453,7 @@ class Campaign:
         """The ONLY entrypoint that touches the test split. With test_n>0 scores a
         deterministic test subsample (same seed family as ablate) -- a cheap honest
         verdict that keeps the LLM-rerank bill bounded; test_n=0 = full 2801 split."""
+        from starksearch.reward import QUALITY_KEYS  # STaRK axes (boot() put it on path)
         cfg = self.cfg
         run_dir = os.path.join(cfg.runs_dir, campaign)
         best_path = os.path.join(run_dir, "best_search.py")
@@ -459,6 +499,7 @@ class Campaign:
         Opus, embedder calls only. Answers 'is the embedder or the LLM extractor
         doing the work?' for cents. Reports B-A (sparse fusion) and C-B (LLM
         query-understanding) when the three canonical arms are present."""
+        from starksearch.reward import QUALITY_KEYS  # STaRK axes (boot() put it on path)
         cfg = self.cfg
         run_dir = os.path.join(cfg.runs_dir, campaign)
         os.makedirs(run_dir, exist_ok=True)

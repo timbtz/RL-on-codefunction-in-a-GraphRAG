@@ -1,6 +1,6 @@
 # Strategy family "reasoning_first" -- the run-5 reasoning-rerank arm.
 family: reasoning_first
-seed: src/graphretr_opt/artifact/seeds/reasoning_first.py
+seed: ../starksearch/seeds/reasoning_first.py
 notes: >
   G.extract routes the query, typed dense retrieval builds a bounded pool, and
   the fixed-prompt G.llm_rerank reasons about relational relevance to reorder

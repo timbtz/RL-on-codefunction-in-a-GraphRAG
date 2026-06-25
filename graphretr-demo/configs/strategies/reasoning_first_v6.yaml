@@ -1,7 +1,7 @@
 # Strategy family "reasoning_first_v6" -- the run-6 arm: run-5 reasoning-rerank
 # plus the new recall operator G.reformulate.
 family: reasoning_first_v6
-seed: src/graphretr_opt/artifact/seeds/reasoning_first_v6.py
+seed: ../starksearch/seeds/reasoning_first_v6.py
 notes: >
   extract -> typed dense retrieve -> llm_rerank -> conditionally
   { reformulate -> re-retrieve -> merge -> rerank } -> stop. The conditional

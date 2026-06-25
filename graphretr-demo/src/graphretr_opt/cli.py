@@ -87,14 +87,16 @@ def main(argv=None):
         overrides["checkpoint_every"] = args.checkpoint_every
 
     if args.cmd == "optimize-search":
-        # graph_search path: boot_search() (no FalkorDB / stark_qa / torch).
+        # graph_search path: cfg.target drives boot() -> boot_search() (no
+        # FalkorDB / stark_qa / torch on this path).
         overrides["target"] = "graph_search"
         if getattr(args, "fake_target", False):
             overrides["fake_target"] = True
-        camp = Campaign(load_config(**overrides)).boot_search()
+        camp = Campaign(load_config(**overrides)).boot()
         camp.optimize_search(steps=args.steps, campaign=args.campaign_name)
         return
 
+    # function (STaRK) path: cfg.target defaults to "function" -> _boot_function().
     campaign = Campaign(load_config(**overrides)).boot()
 
     if args.cmd == "stage0":

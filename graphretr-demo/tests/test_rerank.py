@@ -9,9 +9,9 @@ import tempfile
 
 from graphretr_opt.config import load_config
 from graphretr_opt.env.openai_client import BudgetExceeded
-from graphretr_opt.env.primitives import Allowlists
-from graphretr_opt.env.retrieval_graph import RetrievalGraph
-from graphretr_opt.env.sandbox import check_source
+from starksearch.primitives import Allowlists
+from starksearch.graph import RetrievalGraph
+from graphretr_opt.env.targets._worker_stark import _compile_candidate
 
 
 def _check(name, cond):
@@ -102,19 +102,19 @@ def test_cache_and_restart():
         _check("rerank: restart returns same order", c == a)
 
 
-def test_seeds_pass_sandbox():
+def test_seeds_are_loadable():
     root = load_config().root
     for name in ("reasoning_first", "reasoning_first_static"):
-        path = os.path.join(root, "src/graphretr_opt/artifact/seeds", f"{name}.py")
-        check_source(open(path).read())  # raises on violation
-        _check(f"sandbox: seed {name} passes AST gate", True)
+        path = os.path.join(root, "../starksearch/seeds", f"{name}.py")
+        _compile_candidate(open(path).read())  # raises if not loadable / no search
+        _check(f"seed {name} loads (loosened subprocess exec)", True)
 
 
 def main():
     test_pinning_and_pool_cap()
     test_budget_ceiling()
     test_cache_and_restart()
-    test_seeds_pass_sandbox()
+    test_seeds_are_loadable()
     print("\nall rerank tests passed")
 
 

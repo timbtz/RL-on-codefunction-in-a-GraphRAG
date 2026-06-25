@@ -8,4 +8,8 @@ requires-python = ">=3.11"
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+# "src" -> graphretr_opt (the engine). ".." -> the monorepo root, so the sibling
+# search services `starksearch` and `graphsearch` (carved out of the engine,
+# 2026-06-25) import as packages during the test suite. Ordered after "src" so
+# the engine wins any name lookup; the services have distinct top-level names.
+pythonpath = ["src", ".."]

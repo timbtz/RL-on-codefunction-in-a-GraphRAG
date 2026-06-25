@@ -1,17 +1,15 @@
-"""reward -- the scoring layer.
+"""reward -- the engine's scoring FRAMEWORK (target-agnostic).
 
-`MetricVector` / `code_complexity` are pure (ast + math) and exported eagerly.
-`RewardModel` pulls torch (STaRK node-containment scoring), so it is exposed
-LAZILY -- the graph_search path scores via reward.mcq_reward.McqReward (no torch)
-and must be able to import the package without dragging torch in.
+`MetricVector` / `code_complexity` (pure ast + math) and `pareto.dominates` are
+the generic pieces every target reuses. The per-target SCORERS live with their
+service: STaRK node-containment in `starksearch.reward` (torch), MCQ accuracy in
+`graphsearch.reward` (the carve-out, 2026-06-25). Nothing target-specific is
+imported here, so this package stays importable without torch / stark_qa.
 """
 from .objectives import MetricVector, code_complexity  # noqa: F401
 
 
 def __getattr__(name):  # PEP 562 lazy attribute
-    if name == "RewardModel":
-        from .evaluator import RewardModel
-        return RewardModel
     if name == "dominates":
         from .pareto import dominates
         return dominates

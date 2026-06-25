@@ -11,9 +11,9 @@ import tempfile
 
 from graphretr_opt.config import load_config
 from graphretr_opt.env.openai_client import BudgetExceeded
-from graphretr_opt.env.primitives import Allowlists
-from graphretr_opt.env.retrieval_graph import RetrievalGraph
-from graphretr_opt.env.sandbox import check_source
+from starksearch.primitives import Allowlists
+from starksearch.graph import RetrievalGraph
+from graphretr_opt.env.targets._worker_stark import _compile_candidate
 
 
 def _check(name, cond):
@@ -108,12 +108,12 @@ def test_empty_fallback():
                out == "original question")
 
 
-def test_seed_v6_passes_sandbox():
+def test_seed_v6_is_loadable():
     root = load_config().root
-    path = os.path.join(root, "src/graphretr_opt/artifact/seeds",
+    path = os.path.join(root, "../starksearch/seeds",
                         "reasoning_first_v6.py")
-    check_source(open(path).read())  # raises on violation
-    _check("sandbox: seed reasoning_first_v6 passes AST gate", True)
+    _compile_candidate(open(path).read())  # raises if not loadable / no search
+    _check("seed reasoning_first_v6 loads (loosened subprocess exec)", True)
 
 
 def main():
@@ -121,7 +121,7 @@ def main():
     test_budget_ceiling()
     test_cache_and_restart()
     test_empty_fallback()
-    test_seed_v6_passes_sandbox()
+    test_seed_v6_is_loadable()
     print("\nall reformulate tests passed")
 
 

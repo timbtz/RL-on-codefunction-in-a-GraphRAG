@@ -24,7 +24,7 @@ import re
 import string
 import time
 
-from .objectives import MetricVector, code_complexity
+from graphretr_opt.reward.objectives import MetricVector, code_complexity
 from .qa_objectives import MCQ_PRIMARY, MCQ_QUALITY_KEYS
 
 # Mirror of graphsearch/mcq_gen/mcq_format (kept in sync by hand) -- the hot loop

@@ -3,9 +3,9 @@ and the whole of the Stage-1 demo: rollout -> reflect -> mutate -> gate ->
 accept/reject, with a fixed-subsample gate, an sha-keyed score cache, and a
 rejected buffer feeding the next prompt.
 
-It never touches the test split. All cross-strategy machinery (SlowLoop,
-scheduler) is out of scope here -- FastLoop takes a seed and a budget and
-returns an ArmResult.
+It never touches the test split. The deferred cross-strategy (slow-loop) layer
+is out of scope here -- FastLoop takes a seed and a budget and returns an
+ArmResult.
 """
 import json
 import os
@@ -18,8 +18,8 @@ from ..agents.single import AgentUnavailable
 from ..artifact.program import SearchProgram
 from ..atomic_io import atomic_write_json
 from ..env.openai_client import BudgetExceeded, step_cost_delta
-from ..env.sandbox import SandboxError
-from ..reward.objectives import MetricVector, QUALITY_KEYS
+from ..env.errors import SandboxError
+from ..reward.objectives import MetricVector
 from .gate import Gate
 from .pool import CandidatePool
 from .rejected_buffer import RejectedBuffer
@@ -522,7 +522,7 @@ class FastLoop:
                 cache.put(_ckey(best_prog.sha), best)
             pool.consider(best_prog, best)
             print(f"[fast_loop] seed gate ({time.time()-t0:.0f}s): "
-                  f"{ {k: round(best.get(k), 4) for k in QUALITY_KEYS} }"
+                  f"{ {k: round(v, 4) for k, v in best.quality.items()} }"
                   + (f"  [pool ON cap={pool_cap}]" if pool_on else "  [single incumbent]"))
         self._tracker.log_vector("best_", best, step=(start_step - 1))
 
@@ -930,7 +930,7 @@ class FastLoop:
         seed_program.save(os.path.join(run_dir, "seed_used.py"))
         with open(os.path.join(run_dir, "seed_vs_best.diff"), "w") as f:
             f.write(seed_program.diff(best_prog, max_lines=10_000))
-        print(f"[fast_loop] done. best: { {k: round(best.get(k), 4) for k in QUALITY_KEYS} }")
+        print(f"[fast_loop] done. best: { {k: round(v, 4) for k, v in best.quality.items()} }")
         return ArmResult(best_prog.family, best_prog, best, run_dir)
 
     def _minibatch_eps(self, mb_size, cfg):

@@ -20,7 +20,7 @@ so _reflect's missed/misranked split becomes exactly the retrieval-vs-reasoning
 signal the plan wants -- with NO change to the loop. `retrieved`/`answer_ids` are
 left empty so the loop's node-id machinery (get_text) stays inert.
 """
-from .objectives import code_complexity  # noqa: F401  (re-exported convenience)
+from graphretr_opt.reward.objectives import code_complexity  # noqa: F401  (re-exported convenience)
 
 
 class McqRewardAdapter:

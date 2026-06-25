@@ -11,8 +11,8 @@ import os
 import tempfile
 
 from graphretr_opt.config import load_config
-from graphretr_opt.env.primitives import Allowlists
-from graphretr_opt.env.retrieval_graph import RetrievalGraph
+from starksearch.primitives import Allowlists
+from starksearch.graph import RetrievalGraph
 
 
 def _check(name, cond):

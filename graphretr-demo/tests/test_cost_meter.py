@@ -10,12 +10,10 @@ No FalkorDB / no network needed (LLM + get_text stubbed).
 """
 import os
 import tempfile
-import types
 
 from graphretr_opt.config import load_config
-from graphretr_opt.env.primitives import Allowlists
-from graphretr_opt.env.retrieval_graph import RetrievalGraph
-from graphretr_opt.env.sandbox import Sandbox
+from starksearch.primitives import Allowlists
+from starksearch.graph import RetrievalGraph
 from graphretr_opt.reward.objectives import MetricVector
 
 
@@ -24,26 +22,11 @@ def _check(name, cond):
     print(f"ok  {name}")
 
 
-# ---- 0.6a part 1: Sandbox.run threads the rerank_items delta -----------------
-
-def test_sandbox_threads_rerank_items():
-    graph = types.SimpleNamespace(_rerank_items=0, _llm_calls=0)
-    sb = Sandbox(graph, default_timeout_s=1.0)
-
-    def fn(q, G):
-        # a public primitive (llm_rerank) would bump this; simulate 7 items here.
-        G._rerank_items += 7
-        return {1: 1.0}
-
-    _, stats = sb.run(fn, "q")
-    _check("RunStats carries the rerank_items delta from the graph",
-           stats.rerank_items == 7)
-
-    # a program that never reranks reports 0 (not a missing/None field).
-    def fn0(q, G):
-        return {1: 1.0}
-    _, stats0 = sb.run(fn0, "q")
-    _check("no-rerank program meters 0 items", stats0.rerank_items == 0)
+# The old "Sandbox.run threads the rerank_items delta" unit was removed with the
+# in-process Sandbox (carve-out 2026-06-25): the subprocess worker
+# (_worker_stark._one) now snapshots the SAME `_rerank_items` delta into its cost
+# payload, and StarkRewardAdapter folds it into MetricVector.rerank_items. The
+# counter itself (the real cost driver) is still unit-tested directly below.
 
 
 # ---- 0.6a part 2: llm_rerank charges len(pool) items -------------------------
@@ -94,7 +77,6 @@ def test_metricvector_exposes_rerank_items():
 
 
 def main():
-    test_sandbox_threads_rerank_items()
     test_llm_rerank_charges_pool_size()
     test_metricvector_exposes_rerank_items()
     print("\nall cost_meter tests passed")
