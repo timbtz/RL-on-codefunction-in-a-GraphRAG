@@ -63,6 +63,11 @@ class FastLoop:
         self._edit_budget = edit_budget
         self._tracker = tracker
         self._budget = budget  # OpenAIBudget (or None); per-step cost attribution
+        # graph_search: per-question rows from a program's last full-gate score,
+        # keyed by sha. Lets the reflection step reuse the incumbent's already-
+        # computed per-question results instead of re-running the (unchanged,
+        # deterministic) incumbent -- removing one full agentic eval per step.
+        self._rows_by_sha = {}
         blend = {}
         for part in str(getattr(cfg, "gate_blend", "") or "").split(","):
             if ":" in part:
@@ -165,8 +170,17 @@ class FastLoop:
         s = cache.get(ckey)
         if s is not None:
             return s, True, time.time() - t
-        s = self._reward.score(cand_fn, gate_idxs, src=cand.src,
-                               per_query_timeout_s=self._cfg.probe_timeout_s)
+        if getattr(self._cfg, "target", None) == "graph_search":
+            # Capture per-question rows (the reward computes them regardless, so
+            # this is free) and stash them so the next step's reflection can reuse
+            # this program's results instead of re-scoring it.
+            s, rows = self._reward.score(
+                cand_fn, gate_idxs, src=cand.src, return_rows=True,
+                per_query_timeout_s=self._cfg.probe_timeout_s)
+            self._rows_by_sha[cand.sha] = rows
+        else:
+            s = self._reward.score(cand_fn, gate_idxs, src=cand.src,
+                                   per_query_timeout_s=self._cfg.probe_timeout_s)
         cache.put(ckey, s)
         return s, False, time.time() - t
 
@@ -353,6 +367,12 @@ class FastLoop:
         temp+replace write is simpler and correct). RNG state is deliberately NOT
         stored: every draw in this loop is a per-step-seeded `random.Random(seed+step)`
         (no global stream), so resuming at the same step reproduces the same draws."""
+        if hasattr(best_prog, "overlay"):     # FileSet (graph_search target)
+            best_block = {"kind": "file_set", "artifact": best_prog.to_dict(),
+                          "metrics": best.to_dict() if best is not None else None}
+        else:                                 # SearchProgram (function target)
+            best_block = {"src": best_prog.src, "family": best_prog.family,
+                          "metrics": best.to_dict() if best is not None else None}
         blob = {
             "version": CHECKPOINT_VERSION,
             "config_hash": self._guard_hash(),
@@ -362,8 +382,7 @@ class FastLoop:
             "steps_run": steps_run,
             "stale": stale,
             "stop_stale_ctr": stop_stale_ctr,
-            "best": {"src": best_prog.src, "family": best_prog.family,
-                     "metrics": best.to_dict() if best is not None else None},
+            "best": best_block,
             "pool": pool.to_dict(),
         }
         atomic_write_json(self._checkpoint_path(run_dir), blob, indent=1)
@@ -433,6 +452,11 @@ class FastLoop:
             return f
 
         def _compiles(src):
+            # Pool-resume validate. On the graph_search path the artifact is a
+            # FileSet (NullSandbox.compile never raises), so it always loads; on
+            # the function path `src` is a source string the real Sandbox compiles.
+            if hasattr(src, "overlay"):
+                return True
             try:
                 self._sandbox.compile(src)
                 return True
@@ -451,9 +475,13 @@ class FastLoop:
         blob = self._load_checkpoint(run_dir) if bool(getattr(cfg, "resume", False)) else None
         if blob is not None:
             try:
-                best_prog = SearchProgram(
-                    blob["best"]["src"],
-                    family=blob["best"].get("family", seed_program.family))
+                if blob["best"].get("kind") == "file_set":
+                    from ..artifact.file_set import FileSet
+                    best_prog = FileSet.from_dict(blob["best"]["artifact"])
+                else:
+                    best_prog = SearchProgram(
+                        blob["best"]["src"],
+                        family=blob["best"].get("family", seed_program.family))
                 best_fn = self._sandbox.compile(best_prog.src)
                 fn_cache[best_prog.sha] = best_fn
                 pool = CandidatePool.from_dict(blob["pool"], validate=_compiles)
@@ -586,11 +614,23 @@ class FastLoop:
             parent_sha = parent_prog.sha
             parent_fn = _get_fn(parent_prog)
 
-            ridxs = random.Random(cfg.gate_seed + step).sample(
-                substrate.train_idxs, cfg.rollout_batch)
-            _, rows = self._reward.score(parent_fn, ridxs, src=parent_prog.src,
-                                         return_rows=True,
-                                         per_query_timeout_s=cfg.probe_timeout_s)
+            # Reuse the incumbent's already-computed per-question rows when we have
+            # them (graph_search): the parent is unchanged and the search is
+            # deterministic (temperature=0), so re-running it just to re-derive its
+            # failures wastes a full agentic eval. Fall back to a one-off re-score
+            # only when uncached (e.g. the seed on the very first step).
+            reuse = (getattr(cfg, "target", None) == "graph_search"
+                     and self._rows_by_sha.get(parent_sha) is not None)
+            if reuse:
+                rows = self._rows_by_sha[parent_sha]
+            else:
+                ridxs = random.Random(cfg.gate_seed + step).sample(
+                    substrate.train_idxs, cfg.rollout_batch)
+                _, rows = self._reward.score(parent_fn, ridxs, src=parent_prog.src,
+                                             return_rows=True,
+                                             per_query_timeout_s=cfg.probe_timeout_s)
+                if getattr(cfg, "target", None) == "graph_search":
+                    self._rows_by_sha[parent_sha] = rows
             fails, wins = self._reflect(rows, cfg.reflect_top)
 
             L_t = self._edit_budget.L_t(step)
@@ -626,6 +666,29 @@ class FastLoop:
 
             with open(os.path.join(run_dir, f"reflection_{step:03d}.md"), "w") as f:
                 f.write(transcript)
+            # Live, per-step MLflow logging (MCQ/graph_search path): the incumbent
+            # version's per-question results (chosen vs gold, right/wrong,
+            # retrieval-hit) AND the synthesized mistake+fix transcript -- so the
+            # run shows "which version got which MCQ right and why" as it goes,
+            # not just one recap at the very end. `rows` is the incumbent re-score
+            # already computed above for reflection, so this is zero extra cost.
+            if rows and "chosen_idx" in (rows[0] or {}):
+                try:
+                    self._tracker.log_artifact(
+                        os.path.join(run_dir, f"reflection_{step:03d}.md"))
+                    recap = [{
+                        "step": step, "incumbent_sha": parent_sha[:8],
+                        "q_id": r.get("q_id"), "question": r.get("query"),
+                        "chosen_idx": r.get("chosen_idx"), "gold_idx": r.get("gold_idx"),
+                        "openbook_correct": int(bool(r.get("openbook_correct"))),
+                        "retrieval_hit": int(bool(r.get("retrieval_hit"))),
+                        "error": r.get("error"),
+                        "context_preview": (r.get("context_preview") or "")[:300],
+                    } for r in rows]
+                    self._tracker.log_table(
+                        recap, artifact_file=f"recap/step_{step:03d}_incumbent.json")
+                except Exception as e:
+                    print(f"[fast_loop] per-step recap log skipped: {e}")
             if cand is not None:
                 cand.save(os.path.join(run_dir, f"step_{step:03d}.py"))
 

@@ -103,9 +103,70 @@ class Config:
     # strategy arm
     strategy: str = "vector_only"
 
+    # --- graph_search target (the real agentic search service) --------------
+    target: str = "function"               # function | graph_search
+    graphsearch_src: str = "graphsearch/src"          # base checkout to overlay
+    dataset_path: str = "graphsearch/data/dataset.json"  # gold MCQ set
+    editable_files: tuple = (
+        "common/service/search/agentic_graph_traversal_search_service.py",
+    )                                       # relpaths the mutator may edit (tuple => hashable)
+    fake_target: bool = False              # use FakeSearchTarget (offline, no infra)
+    # Neo4j creds (env: GRAPHSEARCH_NEO4J_URL/USER/PASSWORD/DATABASE)
+    neo4j_url: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = ""
+    neo4j_database: str = "neo4j"
+    # the chat model the SERVICE uses (search-time) and the MCQ ANSWERER (no judge)
+    search_provider: str = "openai"
+    search_model: str = "gpt-4o-mini"
+    answerer_provider: str = "openai"
+    answerer_model: str = "gpt-4o-mini"
+    search_timeout_s: float = 1800.0       # subprocess wall-clock kill per gate BATCH
+    # (one subprocess runs the gate queries, up to query_concurrency in parallel;
+    # the real agentic search makes tens of LLM calls per query, so the batch needs
+    # minutes, not 120s -- generous ceiling, it's a kill switch not a delay)
+    eval_concurrency: int = 2              # cap concurrent candidate subprocesses (Neo4j/API)
+    query_concurrency: int = 3             # graph_search: gate queries run IN PARALLEL inside
+    # one worker (each is an independent, read-only search+answer -> embarrassingly
+    # parallel). conc=3 -> ~90-120 peak concurrent OpenRouter calls (measured safe,
+    # see graphsearch/.env). 1 = old sequential behaviour. Cuts the seed gate from
+    # ~11x(search+answer) sequential to ceil(11/conc) waves.
+    # Cost-aware gate (graph_search): the gate admits on a blended composite
+    #   composite = mcq_accuracy - search_cost_weight * usd_cost
+    # where usd_cost is the REAL mean OpenRouter $/query (search + answerer). This
+    # is THE knob that makes cost crucial: raise it to push the optimizer toward
+    # cheaper architectures (batched relevance call, BM25/no-LLM pruning, leaner
+    # prompts); lower it to prioritize accuracy. Tune after seeing the seed's cost
+    # (keep seed composite > 0: weight < seed_accuracy / seed_usd_cost).
+    search_cost_weight: float = 5.0
+
     @property
     def runs_dir(self):
         return os.path.join(self.root, "runs")
+
+    @property
+    def repo_root(self):
+        """The monorepo root (parent of graphretr-demo) -- graphsearch is a
+        sibling of the optimizer, so graphsearch_src / dataset_path resolve
+        against this, not the optimizer's own root."""
+        return os.path.dirname(self.root)
+
+    def _resolve(self, path):
+        return path if os.path.isabs(path) else os.path.join(self.repo_root, path)
+
+    @property
+    def graphsearch_src_abs(self):
+        return self._resolve(self.graphsearch_src)
+
+    @property
+    def dataset_path_abs(self):
+        return self._resolve(self.dataset_path)
+
+    @property
+    def opt_src_abs(self):
+        """The optimizer's own `src` dir (put on the worker subprocess's
+        PYTHONPATH so `python -m graphretr_opt..._worker` resolves)."""
+        return os.path.join(self.root, "src")
 
     # ---- resolved-config snapshot + hash (auditability, Phase A) -----------
     # The full effective config AFTER defaults < campaign.yaml < env < kwargs is
@@ -157,11 +218,27 @@ def load_config(**overrides) -> Config:
         "mlflow_url": os.environ.get("MLFLOW_URL"),
         "mutator_backend": os.environ.get("MUTATOR_BACKEND"),
         "mutator_model": os.environ.get("MUTATOR_MODEL"),
+        # graph_search target (own GRAPHSEARCH_* namespace, documented in Task 0)
+        "neo4j_url": os.environ.get("GRAPHSEARCH_NEO4J_URL"),
+        "neo4j_user": os.environ.get("GRAPHSEARCH_NEO4J_USER"),
+        "neo4j_password": os.environ.get("GRAPHSEARCH_NEO4J_PASSWORD"),
+        "neo4j_database": os.environ.get("GRAPHSEARCH_NEO4J_DATABASE"),
+        "answerer_model": os.environ.get("ANSWERER_MODEL"),
+        "search_model": os.environ.get("SEARCH_MODEL"),
+        "search_provider": os.environ.get("SEARCH_PROVIDER"),
+        "answerer_provider": os.environ.get("ANSWERER_PROVIDER"),
+        "query_concurrency": (int(os.environ["QUERY_CONCURRENCY"])
+                              if os.environ.get("QUERY_CONCURRENCY") else None),
+        "search_cost_weight": (float(os.environ["SEARCH_COST_WEIGHT"])
+                               if os.environ.get("SEARCH_COST_WEIGHT") else None),
+        "fake_target": True if os.environ.get("GRAPHRETR_FAKE_TARGET") == "1" else None,
     }
     if env["mutator_backend"] is None and os.environ.get("ANTHROPIC_API_KEY"):
         env["mutator_backend"] = "sdk"
     kw.update({k: v for k, v in env.items() if v is not None})
     kw.update(overrides)
+    if isinstance(kw.get("editable_files"), list):  # yaml -> tuple (hashable)
+        kw["editable_files"] = tuple(kw["editable_files"])
     return Config(**kw)
 
 

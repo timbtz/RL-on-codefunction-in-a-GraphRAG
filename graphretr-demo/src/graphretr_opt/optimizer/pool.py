@@ -82,6 +82,14 @@ class CandidatePool:
         loop's stop condition counts (A4: stale = steps adding no frontier
         member). A specialist admitted only on the instance-wise rule does NOT
         grow the frontier."""
+        # Hard-reject crashes BEFORE the Pareto test. A crashed candidate aborts
+        # early, so its cost axes are garbage-LOW (e.g. db_load drops because it
+        # never finished the DB work) -- on the cost-minimizing axes of dominates()
+        # that makes a mcq=0 crash "non-dominated", so it would slip onto the
+        # frontier and (worse) reset the stale counter via frontier_grew. A broken
+        # program is never a frontier member.
+        if getattr(metrics, "crashed", False):
+            return False, False
         if program.sha in self.shas():
             return False, False
         dominated = any(dominates(m.metrics, metrics) for m in self.members)
@@ -164,29 +172,47 @@ class CandidatePool:
         """Serializable snapshot for the Phase-1 campaign checkpoint. Stores each
         member's program SOURCE (the sha is derived) + family + full MetricVector
         (incl. per_query, which the score_cache's flat form drops) + children
-        count, so a resumed run rebuilds the exact selection state."""
-        return {
-            "cap": self.cap,
-            "members": [{
-                "src": m.program.src,
-                "family": m.program.family,
-                "metrics": m.metrics.to_dict(),
-                "children": m.children,
-            } for m in self.members],
-        }
+        count, so a resumed run rebuilds the exact selection state.
+
+        Artifact-agnostic: a FileSet (graph_search target) carries `to_dict`, so
+        its overlay is stored under "artifact" with kind="file_set"; a
+        SearchProgram (function target) stores "src"+"family" as before -- the
+        function-campaign checkpoint is byte-identical."""
+        members = []
+        for m in self.members:
+            rec = {"metrics": m.metrics.to_dict(), "children": m.children}
+            if hasattr(m.program, "overlay"):  # FileSet
+                rec["kind"] = "file_set"
+                rec["artifact"] = m.program.to_dict()
+            else:                               # SearchProgram
+                rec["src"] = m.program.src
+                rec["family"] = m.program.family
+            members.append(rec)
+        return {"cap": self.cap, "members": members}
 
     @classmethod
     def from_dict(cls, d: dict, validate=None) -> "CandidatePool":
-        """Rebuild from `to_dict()`. `validate(src) -> bool` (optional) drops any
-        member whose source no longer compiles -- mirrors openEvolve's defensive
+        """Rebuild from `to_dict()`. `validate(program) -> bool` (optional) drops
+        any member whose program no longer loads -- mirrors openEvolve's defensive
         reload (prune broken programs rather than abort the whole resume), but
-        without inheriting its monolith. Member order/children are preserved."""
+        without inheriting its monolith. Member order/children are preserved.
+
+        `validate` is called with the rebuilt program object (FileSet) on the
+        graph_search path and with the source STRING on the function path, since
+        the existing function-campaign validate (`_compiles`) takes a src string;
+        the loop passes a validate that handles whichever it built."""
         pool = cls(cap=int(d.get("cap", 24)))
         for rec in d.get("members", []):
-            src = rec["src"]
-            if validate is not None and not validate(src):
+            if rec.get("kind") == "file_set":
+                from ..artifact.file_set import FileSet
+                prog = FileSet.from_dict(rec["artifact"])
+                check_arg = prog
+            else:
+                prog = SearchProgram(rec["src"],
+                                     family=rec.get("family", "unknown"))
+                check_arg = rec["src"]
+            if validate is not None and not validate(check_arg):
                 continue
-            prog = SearchProgram(src, family=rec.get("family", "unknown"))
             member = PoolMember(prog, MetricVector.from_dict(rec["metrics"]))
             member.children = int(rec.get("children", 0))
             pool.members.append(member)

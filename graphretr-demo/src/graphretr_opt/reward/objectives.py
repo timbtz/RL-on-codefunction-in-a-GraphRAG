@@ -46,15 +46,37 @@ class MetricVector:
     crashed_frac: float = 0.0
     crashed: bool = False
     recall_at_100: float = 0.0            # Phase C2 diagnostic axis (non-gated)
+    usd_cost: float = 0.0                 # graph_search: REAL mean USD cost/query
+                                          # (OpenRouter token_usage.cost, search +
+                                          # answerer). The crucial cost axis -- in
+                                          # the MCQ dominance tuple and the gate
+                                          # blend, so the optimizer trades dollars
+                                          # against accuracy (not raw call count).
+    tokens_in: float = 0.0                # mean input tokens/query (diagnostic)
+    tokens_out: float = 0.0               # mean output tokens/query (diagnostic)
     per_query: dict = field(default_factory=dict)  # Phase A1: idx -> {mrr, hit@1, recall@100}
+    primary_key: str = "recall@20"        # R5: which quality axis `primary` reads.
+                                          # Default = the function campaign's
+                                          # recall@20; the graph_search reward sets
+                                          # it to "mcq_accuracy" so the same
+                                          # Pareto/dominance/pool code compares the
+                                          # right axis without a second pool.
 
     @property
     def primary(self) -> float:
-        """The headline quality axis the Stage-1 gate compares (recall@20)."""
-        return self.quality.get("recall@20", 0.0)
+        """The headline quality axis the dominance/pool code compares. Defaults
+        to recall@20 (function campaign); MCQ rewards set primary_key to
+        "mcq_accuracy" so dominance ranks on the MCQ axis (Risk R5)."""
+        return self.quality.get(self.primary_key, 0.0)
 
     def get(self, metric: str) -> float:
-        return self.quality.get(metric, 0.0)
+        """Quality axes first; fall back to top-level cost attrs (usd_cost,
+        llm_calls, latency_s, ...) so a cost-aware gate `blend` can weight them
+        (e.g. "mcq_accuracy:1.0,usd_cost:-5.0")."""
+        if metric in self.quality:
+            return self.quality[metric]
+        v = getattr(self, metric, None)
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
 
     def as_flat(self) -> dict:
         """Flat dict for MLflow logging (no '@' -- not a legal metric char).
@@ -65,6 +87,8 @@ class MetricVector:
                    llm_calls=self.llm_calls, rerank_items=self.rerank_items,
                    recall_at_100=self.recall_at_100,
                    code_complexity=self.code_complexity,
+                   usd_cost=self.usd_cost, tokens_in=self.tokens_in,
+                   tokens_out=self.tokens_out,
                    crashed_frac=self.crashed_frac, crashed=float(self.crashed))
         return out
 
@@ -83,7 +107,8 @@ class MetricVector:
                 self.quality[k] = 0.0
                 bad = True
         for attr in ("latency_s", "db_load", "llm_calls", "rerank_items",
-                     "code_complexity", "crashed_frac", "recall_at_100"):
+                     "code_complexity", "crashed_frac", "recall_at_100",
+                     "usd_cost", "tokens_in", "tokens_out"):
             if not _is_finite_number(getattr(self, attr)):
                 setattr(self, attr, 0.0)
                 bad = True

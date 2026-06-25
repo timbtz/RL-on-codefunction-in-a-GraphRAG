@@ -32,6 +32,18 @@ def main(argv=None):
     po.add_argument("--checkpoint-every", type=int, default=None,
                     help="atomically snapshot the live pool every N steps (0=off)")
 
+    ps = sub.add_parser("optimize-search",
+                        help="evolve the REAL agentic search service (graph_search "
+                             "target): edit real files, score via subprocess + MCQ")
+    ps.add_argument("--steps", type=int, default=None)
+    ps.add_argument("--campaign-name", default="search")
+    ps.add_argument("--resume", action="store_true",
+                    help="resume from runs/<campaign>/checkpoint.json if present")
+    ps.add_argument("--checkpoint-every", type=int, default=None,
+                    help="atomically snapshot the live pool every N steps (0=off)")
+    ps.add_argument("--fake-target", action="store_true",
+                    help="use FakeSearchTarget (offline: no Neo4j / API keys)")
+
     pf = sub.add_parser("final", help="score seed+best on the locked test split once")
     pf.add_argument("--campaign-name", required=True)
     pf.add_argument("--strategy", default=None,
@@ -73,6 +85,16 @@ def main(argv=None):
         overrides["resume"] = True
     if getattr(args, "checkpoint_every", None) is not None:
         overrides["checkpoint_every"] = args.checkpoint_every
+
+    if args.cmd == "optimize-search":
+        # graph_search path: boot_search() (no FalkorDB / stark_qa / torch).
+        overrides["target"] = "graph_search"
+        if getattr(args, "fake_target", False):
+            overrides["fake_target"] = True
+        camp = Campaign(load_config(**overrides)).boot_search()
+        camp.optimize_search(steps=args.steps, campaign=args.campaign_name)
+        return
+
     campaign = Campaign(load_config(**overrides)).boot()
 
     if args.cmd == "stage0":
