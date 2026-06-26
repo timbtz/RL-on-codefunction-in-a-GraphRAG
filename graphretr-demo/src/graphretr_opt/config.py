@@ -3,8 +3,9 @@
 Precedence: dataclass defaults < configs/campaign.yaml < environment variables
 (FALKOR_HOST/FALKOR_PORT/GRAPH_NAME/MLFLOW_URL/MUTATOR_BACKEND/MUTATOR_MODEL)
 < explicit kwargs to load_config(). A `.env` file at the project root (KEY=VAL
-lines) is read into os.environ first; if it carries ANTHROPIC_API_KEY the
-mutator backend auto-switches to `sdk`.
+lines) is read into os.environ first; if it carries ZAI_API_KEY/Z.AI_KEY the
+mutator backend auto-switches to `zai` (GLM), or `sdk` for ANTHROPIC_API_KEY --
+but only when no backend is set anywhere (yaml/env/kwarg).
 """
 import hashlib
 import os
@@ -238,9 +239,31 @@ def _load_dotenv():
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
+def _autoswitch_backend(doc, overrides, env_backend):
+    """Pick a mutator backend from key presence, but ONLY when no backend was
+    specified anywhere -- yaml `mutator_backend`, the MUTATOR_BACKEND env var, or
+    a kwarg override. Returns "zai" | "sdk" | None (None => keep whatever the
+    caller/yaml set). z.ai wins over anthropic when both keys are present.
+
+    Precedence-correct: an explicit `mutator_backend: cli` in campaign.yaml is
+    NOT clobbered by a z.ai key sitting in .env (the old auto-switch could do
+    that, since it only checked the env var)."""
+    specified = ("mutator_backend" in (doc or {})
+                 or bool(env_backend)
+                 or "mutator_backend" in (overrides or {}))
+    if specified:
+        return None
+    if os.environ.get("ZAI_API_KEY") or os.environ.get("Z.AI_KEY"):
+        return "zai"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "sdk"
+    return None
+
+
 def load_config(**overrides) -> Config:
     _load_dotenv()
     kw = {}
+    doc = {}
     if os.path.exists(CAMPAIGN_YAML):
         doc = yaml.safe_load(open(CAMPAIGN_YAML)) or {}
         known = {f.name for f in fields(Config)}
@@ -270,14 +293,26 @@ def load_config(**overrides) -> Config:
                                if os.environ.get("SEARCH_COST_WEIGHT") else None),
         "fake_target": True if os.environ.get("GRAPHRETR_FAKE_TARGET") == "1" else None,
     }
-    if env["mutator_backend"] is None and os.environ.get("ANTHROPIC_API_KEY"):
-        env["mutator_backend"] = "sdk"
+    # Backend auto-switch by key presence -- but ONLY when no backend was
+    # specified anywhere (see _autoswitch_backend). An explicit `mutator_backend`
+    # is never clobbered by a key in .env.
+    auto = _autoswitch_backend(doc, overrides, env["mutator_backend"])
+    if auto:
+        env["mutator_backend"] = auto
     kw.update({k: v for k, v in env.items() if v is not None})
     kw.update(overrides)
     if isinstance(kw.get("editable_files"), list):  # yaml -> tuple (hashable)
         kw["editable_files"] = tuple(kw["editable_files"])
     if isinstance(kw.get("stark_editable_files"), list):  # yaml -> tuple (hashable)
         kw["stark_editable_files"] = tuple(kw["stark_editable_files"])
+    # The z.ai backend speaks GLM, not Claude: default any leftover claude-*
+    # model slug to glm-5.2 so MUTATOR_BACKEND=zai alone is sufficient and a
+    # stale claude slug can't 404. A non-claude slug the user set is respected.
+    if kw.get("mutator_backend") == "zai":
+        for _mf in ("mutator_model", "analyst_model",
+                    "editor_model", "architect_model"):
+            if str(kw.get(_mf, "")).startswith("claude"):
+                kw[_mf] = "glm-5.2"
     return Config(**kw)
 
 

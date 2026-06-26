@@ -96,7 +96,10 @@ class FastLoop:
         Splitting reflect_top ~50/50 teaches the optimizer both. Winners are
         currently-passing queries shown as 'do not regress' (success-path
         regularizer; cheap insurance now that the complexity cap is off).
-        -> (failures, wins)."""
+        `summary` is a one-line rollout aggregate (mean recall@20 / recall@100 and
+        the GENERATION/RANKING/MIXED split, same thresholds as `_failure_record`) --
+        the population-level signal that picks the strategy. Error rows -> GENERATION.
+        -> (failures, wins, summary)."""
         def m(r):
             return r["metrics"]
         missed = [r for r in rows
@@ -111,7 +114,38 @@ class FastLoop:
         failures = [self._failure_record(r, bucket) for r, bucket in chosen]
         wins = [{"query": r["query"], "metrics": m(r)} for r in rows
                 if not r.get("error") and m(r)["hit@1"] >= 1.0][:3]
-        return failures, wins
+        # Aggregate rollout header (run11 fix): mean recall@20 / recall@100 and the
+        # GENERATION/RANKING/MIXED split via the SAME thresholds as _failure_record
+        # (r100>=0.999 RANKING; r100>r20+1e-9 MIXED; else GENERATION). Error rows
+        # carry no metrics -> recall 0 -> GENERATION; means guarded by max(1, N).
+        # One line; rendered above the per-query failures by format_evidence(summary=).
+        n_rows = max(1, len(rows))
+        tot_r20 = tot_r100 = 0.0
+        n_gen = n_rank = n_mixed = 0
+        for r in rows:
+            metrics = r.get("metrics") or {}
+            r20 = metrics.get("recall@20", 0.0)
+            r100 = r.get("recall@100", 0.0)
+            tot_r20 += r20
+            tot_r100 += r100
+            if r100 >= 0.999:
+                n_rank += 1
+            elif r100 > r20 + 1e-9:
+                n_mixed += 1
+            else:
+                n_gen += 1
+        mean_r20 = tot_r20 / n_rows
+        mean_r100 = tot_r100 / n_rows
+        if n_rank >= n_gen:
+            hint = ("Most misses are RANKING -- gold is reachable but mis-ranked; "
+                    "prioritize scoring/rerank.")
+        else:
+            hint = "Gold often not generated -- prioritize broader/graph retrieval."
+        summary = (f"## Rollout summary ({len(rows)} train queries): mean "
+                   f"recall@20={mean_r20:.2f}, mean recall@100={mean_r100:.2f}. "
+                   f"Failure mix: {n_rank} RANKING / {n_mixed} MIXED / "
+                   f"{n_gen} GENERATION. {hint}")
+        return failures, wins, summary
 
     def _failure_record(self, r, bucket):
         """One reflection entry: missed-gold texts, the top non-gold nodes that
@@ -686,7 +720,7 @@ class FastLoop:
                                              per_query_timeout_s=cfg.probe_timeout_s)
                 if getattr(cfg, "target", None) == "graph_search":
                     self._rows_by_sha[parent_sha] = rows
-            fails, wins = self._reflect(rows, cfg.reflect_top)
+            fails, wins, summary = self._reflect(rows, cfg.reflect_top)
 
             L_t = self._edit_budget.L_t(step)
             plateau = bool(arch_plateau and stale >= arch_plateau)
@@ -708,7 +742,8 @@ class FastLoop:
                     parent_prog, fails, wins, buffer.recent(), L_t,
                     plateau=plateau, validate=_validate,
                     repair_budget=int(getattr(cfg, "repair_budget", 0) or 0),
-                    accepted_entries=buffer.accepted(), combine_with=mate_prog)
+                    accepted_entries=buffer.accepted(), combine_with=mate_prog,
+                    summary=summary)
             except AgentUnavailable as e:
                 # CLI limits reached: stop the campaign here, keep the incumbent
                 # as best, and fall through to the normal save-and-return path so

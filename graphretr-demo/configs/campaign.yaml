@@ -89,10 +89,21 @@ crash_frac_limit: 0.10
 
 # mutator
 mutator_agent: single   # single | tiered (Haiku analyst -> Sonnet editor -> Opus architect)
-mutator_backend: cli    # cli (claude -p) | sdk (anthropic client; needs API key)
+mutator_backend: zai    # cli (claude -p) | sdk (anthropic client) | zai (GLM via z.ai API)
+# z.ai (GLM-5.2) direct API -- supersedes the `claude -p` CLI path. The agent
+# (agents/single.py SingleCoder._zai) points the openai SDK at z.ai's
+# OpenAI-compatible endpoint (https://api.z.ai/api/paas/v4/): direct HTTPS, lower
+# latency than spawning the CLI per call. Key in .env as Z.AI_KEY (or ZAI_API_KEY);
+# ZAI_BASE_URL overrides the endpoint. config.py auto-selects `zai` when that key
+# is present AND no backend is set anywhere -- this explicit line instead pins the
+# run's config_hash to GLM-5.2 (an honest experiment id) rather than leaving it
+# implicit via .env. config.py defaults any leftover claude-* slug to glm-5.2 when
+# backend=zai, so MUTATOR_BACKEND=zai alone is enough; set explicitly here too.
+mutator_model: glm-5.2            # SingleCoder model (tiered arm uses the three below instead)
 # explicit ids, NOT bare aliases: the CLI alias "opus" resolves to its newest (4.8);
 # we deliberately pin 4.7 (same $5/$25 price, 1M ctx). Haiku=high-Q, newest Sonnet.
-mutator_model: claude-opus-4-7      # SingleCoder model (tiered arm uses the three below instead)
+# (Inert under mutator_agent: single + backend zai; config.py would default these
+# to glm-5.2 too if the tiered arm were turned on with backend zai.)
 analyst_model: claude-haiku-4-5     # tiered: cheap evidence digest (Haiku 4.5)
 editor_model: claude-sonnet-4-6     # tiered: routine edits (newest Sonnet)
 architect_model: claude-opus-4-7    # tiered: plateau escalation (Opus 4.7, not 4.8)

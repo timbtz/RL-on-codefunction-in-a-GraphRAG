@@ -95,13 +95,75 @@ _EFFICIENCY_LEGEND = (
     "hops, rerank candidates, or LLM calls unless they pay for themselves.\n\n")
 
 
-def format_evidence(failures, wins, buffer_entries, accepted_entries=None):
-    """The rollout evidence block -- what agent.digest() compresses."""
+# --- Family-keyed mutation-prompt blocks (run11 fix): STaRK-prime was being fed
+# the old graph_search framing ("German company KG / FROZEN MCQ answerer"), which
+# contradicts the injected STARK_DOMAIN_NOTE. Each block below is selected by
+# FileSet.family; the graph_search text is kept byte-identical so the shared
+# builder regresses nothing on that path. The STaRK intro states the
+# objective/contract only -- clients / Cypher hard rules arrive via primitives_doc
+# (STARK_DOMAIN_NOTE), so they are not restated here.
+_SEARCH_LEGEND = _EFFICIENCY_LEGEND   # graph_search keeps the cost/size legend
+
+_STARK_LEGEND = (
+    "## How edits are scored -- you are scored on RETRIEVAL QUALITY only. The "
+    "metric is a blend of recall@20 (gold anywhere in top-20) and ranking quality "
+    "(Hit@1 / MRR). Program size and dollar cost are NOT penalized on this "
+    "benchmark, so do not hold back: add a graph walk, an extra retrieval pass, a "
+    "stronger rerank, or a reformulation whenever it can surface or lift gold. "
+    "`crash` (fraction of queries that error or time out) still scores those "
+    "queries ZERO -- keep the service importable and each query within the 2 s "
+    "Cypher timeout. Prefer the change that most increases recall/MRR.\n\n")
+
+_LEGEND_BY_FAMILY = {"stark_search": _STARK_LEGEND, "graph_search": _SEARCH_LEGEND}
+
+_STARK_INTRO = (
+    "You are optimizing a REAL agentic graph-retrieval service for STaRK-prime, a "
+    "biomedical knowledge-graph QA benchmark over a FalkorDB graph. Given a "
+    "natural-language query, `search(self, query) -> dict[int, float]` must return "
+    "candidate node ids mapped to relevance scores (higher = more relevant; only "
+    "the ranking matters, unreturned ids rank last). You are scored on a blend of "
+    "recall@20 (gold anywhere in the top-20) AND ranking quality (Hit@1 / MRR). "
+    "Gold answer sets often contain MANY nodes (median ~10) of any node type. You "
+    "OWN THE WHOLE service file: rewrite any operator's Cypher, embeddings use, "
+    "LLM prompts, fusion math, or add brand-new operators. BOTH failure modes are "
+    "in scope -- if gold is NOT in the pool (GENERATION/recall failure) write "
+    "better/broader retrieval (hybrid text+vector fusion, a multi-hop graph walk "
+    "via `algo.bfs` that reaches gold the embeddings miss); if gold IS in the pool "
+    "but ranked low (RANKING failure) fix the scoring / rerank. Do NOT assume "
+    "stock embedding retrieval is good enough -- it often is not.")
+
+# graph_search objective framing -- VERBATIM from the pre-change build_search_prompt
+# (the 'German company knowledge graph' paragraph). Kept byte-identical as the
+# family default so the shared builder regresses nothing on the graph_search path.
+_SEARCH_INTRO = (
+    "You are optimizing a REAL agentic graph-retrieval service for a German company "
+    "knowledge graph (Neo4j fulltext + recursive traversal, no embeddings). Given a "
+    "natural-language query, `search(query) -> str` returns a retrieved-context "
+    "string with [doc:ID] citations. A separate, FROZEN answerer then picks a "
+    "multiple-choice answer from ONLY that context. You are scored on how often the "
+    "answerer is then correct (closed-book-adjusted) plus whether the gold source "
+    "document appears in your context -- minus cost (LLM calls / latency). So: "
+    "surface the RIGHT documents into the context; do not try to answer the "
+    "question yourself.")
+
+_FILESET_INTRO_BY_FAMILY = {"stark_search": _STARK_INTRO, "graph_search": _SEARCH_INTRO}
+
+
+def format_evidence(failures, wins, buffer_entries, accepted_entries=None,
+                    legend=_SEARCH_LEGEND, summary=None):
+    """The rollout evidence block -- what agent.digest() compresses.
+
+    `legend` defaults to the graph_search cost/size legend (== _EFFICIENCY_LEGEND),
+    so the function-arm build_prompt path and the graph_search FileSet path are
+    byte-identical to pre-change; stark_search passes _STARK_LEGEND. `summary` is
+    optional pre-rendered text (the rollout aggregate header) prepended above the
+    legend; None => no header (back-compat)."""
+    summary_block = (summary + "\n\n") if summary else ""
     won = ""
     if accepted_entries:
         won = ("## Edits that IMPROVED the metric so far -- build on these, do not undo them\n"
                + _format_buffer(accepted_entries) + "\n\n")
-    return f"""{_EFFICIENCY_LEGEND}## Worst failures from the latest rollout (train queries)
+    return f"""{summary_block}{legend}## Worst failures from the latest rollout (train queries)
 {_format_failures(failures)}
 
 {_format_wins(wins)}{won}## Previously rejected edits (did NOT improve the gate -- do not repeat)
@@ -215,6 +277,14 @@ def build_search_prompt(file_set, primitives_doc, digest, max_edits, mate=None):
     a second strong Pareto candidate is shown and the task becomes "synthesize the
     best of both into candidate A" (run10c generation restart)."""
     files_block = _files_block(file_set)
+    # Family-keyed objective framing + cost bullet (run11 fix): STaRK-prime gets
+    # the retrieval-quality intro and drops the (inert on this path) cost bullet;
+    # graph_search keeps the German-KG framing byte-identical (the default).
+    intro = _FILESET_INTRO_BY_FAMILY.get(file_set.family, _SEARCH_INTRO)
+    cost_bullet = (
+        "" if file_set.family == "stark_search"
+        else ("- Cheaper retrieval that keeps quality is rewarded (fewer LLM calls / lower\n"
+              "  latency are cost axes)."))
     combine_block = task = ""
     a_label = " -- candidate A" if mate is not None else ""
     if mate is not None:
@@ -263,14 +333,7 @@ do not copy B wholesale, and do not just revert A to B.
    targeted edits; give a one-line rationale per block.
 """
     return f"""\
-You are optimizing a REAL agentic graph-retrieval service for a German company \
-knowledge graph (Neo4j fulltext + recursive traversal, no embeddings). Given a \
-natural-language query, `search(query) -> str` returns a retrieved-context \
-string with [doc:ID] citations. A separate, FROZEN answerer then picks a \
-multiple-choice answer from ONLY that context. You are scored on how often the \
-answerer is then correct (closed-book-adjusted) plus whether the gold source \
-document appears in your context -- minus cost (LLM calls / latency). So: surface \
-the RIGHT documents into the context; do not try to answer the question yourself.
+{intro}
 
 ## Domain notes
 {primitives_doc}
@@ -284,8 +347,7 @@ the RIGHT documents into the context; do not try to answer the question yourself
 - A file that fails to import, crashes, or hangs scores as a crash for those
   queries (the subprocess is killed on a wall-clock timeout). Prefer changes that
   keep the service importable and the `search` signature intact.
-- Cheaper retrieval that keeps quality is rewarded (fewer LLM calls / lower
-  latency are cost axes).
+{cost_bullet}
 
 ## Evidence (latest rollout -- per-question retrieval/answer outcomes)
 {digest}
@@ -338,7 +400,7 @@ class Mutator:
 
     def propose(self, program: SearchProgram, failures, wins, buffer_entries,
                 edit_budget, plateau=False, validate=None, repair_budget=0,
-                accepted_entries=None, combine_with=None):
+                accepted_entries=None, combine_with=None, summary=None):
         """Propose an edit to `program` from the rollout evidence.
 
         -> (candidate SearchProgram or None, transcript:str, meta:dict) where
@@ -353,7 +415,14 @@ class Mutator:
             candidate and raises SandboxError on reject; its exact text is fed
             back for a targeted fix (compiler-in-the-loop self-repair).
         With validate=None / repair_budget=0 the validation arm never runs."""
-        evidence = format_evidence(failures, wins, buffer_entries, accepted_entries)
+        # Family-keyed legend + the rollout-aggregate header (run11 fix). The
+        # function-arm SearchProgram has a .family too (e.g. "reasoning_first_v7")
+        # which is not in _LEGEND_BY_FAMILY -> falls back to _SEARCH_LEGEND (the
+        # current cost legend), so build_prompt's evidence stays byte-identical.
+        family = getattr(program, "family", "graph_search")
+        legend = _LEGEND_BY_FAMILY.get(family, _SEARCH_LEGEND)
+        evidence = format_evidence(failures, wins, buffer_entries, accepted_entries,
+                                   legend=legend, summary=summary)
         transcript = [f"# EVIDENCE\n\n{evidence}"]
         meta = {"reject_reason": None, "probe_failed": 0}
 

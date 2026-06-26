@@ -1,13 +1,24 @@
 """SingleCoder -- one reflective coding agent. Diagnoses misses and emits a
 new program in a single combined call (SkillOpt style, reasoning model).
 
-Backend 'cli': `claude -p --model <m>` subprocess -- zero config, works on a
-box with only the authenticated CLI. Backend 'sdk': the anthropic client when
-an API key is present (cleaner transcripts, token counts).
+Backends:
+  * 'cli': `claude -p --model <m>` subprocess -- zero config, works on a box
+    with only the authenticated CLI.
+  * 'sdk': the anthropic client when an ANTHROPIC_API_KEY is present (cleaner
+    transcripts, token counts).
+  * 'zai': z.ai's GLM (e.g. glm-5.2) via the openai SDK pointed at z.ai's
+    OpenAI-compatible endpoint -- direct HTTPS, no CLI subprocess, lower
+    latency per step. Needs ZAI_API_KEY (or Z.AI_KEY) in env.
 """
+import os
 import subprocess
 import time
 from collections import Counter
+
+# z.ai (GLM) -- OpenAI-compatible endpoint. Point the openai SDK here (with the
+# ZAI_API_KEY / Z.AI_KEY env var) to call GLM directly instead of the CLI.
+_ZAI_BASE_URL = "https://api.z.ai/api/paas/v4/"
+_ZAI_TEMPERATURE = 0.6   # z.ai documented default; set explicitly for reproducibility
 
 _MODEL_ALIASES = {  # CLI accepts aliases; the SDK needs real model ids
     # opus pinned to 4.7 (NOT the newest 4.8): same price ($5/$25 per 1M) and
@@ -27,10 +38,12 @@ class AgentUnavailable(RuntimeError):
 
 
 class SingleCoder:
-    def __init__(self, backend="cli", model="opus", timeout_s=900):
+    def __init__(self, backend="cli", model="opus", timeout_s=900, max_tokens=8000):
         self.backend = backend
         self.model = model
         self.timeout_s = timeout_s
+        self.max_tokens = max_tokens
+        self._zai_c = None          # cached openai client for the 'zai' backend
         self.call_counts = Counter()   # model -> calls (per-tier cost for MLflow)
 
     def digest(self, evidence: str) -> str:
@@ -43,6 +56,8 @@ class SingleCoder:
         self.call_counts[self.model] += 1
         if self.backend == "sdk":
             return self._sdk(prompt)
+        if self.backend == "zai":
+            return self._zai(prompt)
         return self._cli(prompt)
 
     def _cli(self, prompt):
@@ -74,6 +89,59 @@ class SingleCoder:
         client = anthropic.Anthropic()
         model = _MODEL_ALIASES.get(self.model, self.model)
         msg = client.messages.create(
-            model=model, max_tokens=8000,
+            model=model, max_tokens=self.max_tokens,
             messages=[{"role": "user", "content": prompt}])
         return "".join(b.text for b in msg.content if b.type == "text")
+
+    def _zai_client(self):
+        """Lazily build + cache the z.ai openai client. z.ai is OpenAI-compatible:
+        same SDK, just base_url + key swapped. Cached for the agent's lifetime
+        (one connection pool) -- unlike the _sdk path, which rebuilds per call."""
+        if self._zai_c is None:
+            from openai import OpenAI
+            key = os.environ.get("ZAI_API_KEY") or os.environ.get("Z.AI_KEY")
+            if not key:
+                raise RuntimeError(
+                    "zai backend selected but no ZAI_API_KEY / Z.AI_KEY in env "
+                    "(put it in .env)")
+            base = os.environ.get("ZAI_BASE_URL", _ZAI_BASE_URL)
+            # max_retries=0: we do our own backoff below so a hard spend cap still
+            # raises AgentUnavailable (matching _cli's contract), not a silent retry.
+            self._zai_c = OpenAI(api_key=key, base_url=base,
+                                 timeout=self.timeout_s, max_retries=0)
+        return self._zai_c
+
+    def _zai(self, prompt):
+        # Same backoff + AgentUnavailable contract as _cli: a z.ai rate-limit
+        # window lasts minutes, so without backoff one outage burns every
+        # remaining step in seconds; a hard quota/spend cap never clears within
+        # any backoff window, so we bail immediately instead of sleeping ~15min
+        # per step (the run1/run2 trap _cli's comment warns about).
+        client = self._zai_client()
+        delay, last = 60, "zai: no attempt made"
+        for attempt in range(6):
+            try:
+                resp = client.chat.completions.create(
+                    model=self.model, max_tokens=self.max_tokens,
+                    temperature=_ZAI_TEMPERATURE,
+                    messages=[{"role": "user", "content": prompt}])
+                content = (resp.choices[0].message.content or "").strip()
+            except Exception as e:
+                err = f"{type(e).__name__}: {str(e).strip()}"[:500]
+                low = err.lower()
+                if any(s in low for s in ("quota", "insufficient", "spend limit",
+                                          "exceeded your current", "balance",
+                                          "no credit")):
+                    raise AgentUnavailable(f"zai hard quota/spend: {err}")
+                last = f"zai call failed (attempt {attempt + 1}/6): {err}"
+                wait = delay
+            else:
+                if content:
+                    return content
+                last = f"zai returned empty content (attempt {attempt + 1}/6)"
+                wait = min(delay, 30)   # empty != rate-limited; don't sleep minutes
+            if attempt < 5:
+                print(f"[agent] {last} -- retry in {wait}s", flush=True)
+                time.sleep(wait)
+                delay = min(delay * 2, 900)
+        raise AgentUnavailable(last)
