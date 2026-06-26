@@ -161,13 +161,16 @@ def test_zai_dispatch_and_passthrough():
     client = ag._zai_c
     _check("zai returns message text", out == "REPLY")
     _check("zai client built (cached)", client is not None)
-    _check("zai client base_url is z.ai",
-           "z.ai" in client.init_kw.get("base_url", ""))
+    _check("zai default base_url is the coding endpoint",
+           "/coding/" in client.init_kw.get("base_url", ""))
     _check("zai create model is glm-5.2", client.create_kw.get("model") == "glm-5.2")
     _check("zai create prompt passed through",
            client.create_kw["messages"][0]["content"] == "hello world")
     _check("zai create temperature set",
            client.create_kw.get("temperature") == 0.6)
+    _check("zai disables thinking (latency + avoids empty output)",
+           client.create_kw.get("extra_body", {}).get("thinking", {}).get("type")
+           == "disabled")
 
 
 def test_zai_missing_key_raises():

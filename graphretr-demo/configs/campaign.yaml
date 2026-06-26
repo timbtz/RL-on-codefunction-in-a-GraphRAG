@@ -91,14 +91,17 @@ crash_frac_limit: 0.10
 mutator_agent: single   # single | tiered (Haiku analyst -> Sonnet editor -> Opus architect)
 mutator_backend: zai    # cli (claude -p) | sdk (anthropic client) | zai (GLM via z.ai API)
 # z.ai (GLM-5.2) direct API -- supersedes the `claude -p` CLI path. The agent
-# (agents/single.py SingleCoder._zai) points the openai SDK at z.ai's
-# OpenAI-compatible endpoint (https://api.z.ai/api/paas/v4/): direct HTTPS, lower
-# latency than spawning the CLI per call. Key in .env as Z.AI_KEY (or ZAI_API_KEY);
-# ZAI_BASE_URL overrides the endpoint. config.py auto-selects `zai` when that key
-# is present AND no backend is set anywhere -- this explicit line instead pins the
-# run's config_hash to GLM-5.2 (an honest experiment id) rather than leaving it
-# implicit via .env. config.py defaults any leftover claude-* slug to glm-5.2 when
-# backend=zai, so MUTATOR_BACKEND=zai alone is enough; set explicitly here too.
+# (agents/single.py SingleCoder._zai) points the openai SDK at z.ai's CODING
+# endpoint (https://api.z.ai/api/coding/paas/v4/) -- the one a "Personal Coding
+# Plan" key is authorized on; the general /api/paas/v4 endpoint 429/1113s such a
+# key. Direct HTTPS, lower latency than spawning the CLI per call, and GLM's
+# default thinking mode is DISABLED for speed (it otherwise adds ~5-15s/call and
+# can exhaust max_tokens with empty output). Key in .env as Z.AI_KEY (or
+# ZAI_API_KEY); ZAI_BASE_URL overrides the endpoint (set it to the general one for
+# a pay-as-you-go key). config.py auto-selects `zai` when that key is present AND
+# no backend is set anywhere -- this explicit line pins the run's config_hash to
+# GLM-5.2 (an honest experiment id). config.py defaults any leftover claude-* slug
+# to glm-5.2 when backend=zai, so MUTATOR_BACKEND=zai alone is enough.
 mutator_model: glm-5.2            # SingleCoder model (tiered arm uses the three below instead)
 # explicit ids, NOT bare aliases: the CLI alias "opus" resolves to its newest (4.8);
 # we deliberately pin 4.7 (same $5/$25 price, 1M ctx). Haiku=high-Q, newest Sonnet.

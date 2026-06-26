@@ -15,10 +15,19 @@ import subprocess
 import time
 from collections import Counter
 
-# z.ai (GLM) -- OpenAI-compatible endpoint. Point the openai SDK here (with the
+# z.ai (GLM) -- OpenAI-compatible. Point the openai SDK here (with the
 # ZAI_API_KEY / Z.AI_KEY env var) to call GLM directly instead of the CLI.
-_ZAI_BASE_URL = "https://api.z.ai/api/paas/v4/"
+# DEFAULT is the CODING endpoint (/api/coding/paas/v4): the optimizer is a code
+# agent, and z.ai "Personal Coding Plan" keys (the kind Claude Code itself runs
+# on) are authorized here. The general /api/paas/v4 endpoint returns 429/1113
+# "Insufficient balance" for a coding-plan key. A pay-as-you-go (general) key:
+# set ZAI_BASE_URL=https://api.z.ai/api/paas/v4/ in .env to override.
+_ZAI_BASE_URL = "https://api.z.ai/api/coding/paas/v4/"
 _ZAI_TEMPERATURE = 0.6   # z.ai documented default; set explicitly for reproducibility
+_ZAI_THINKING_ENABLED = False  # GLM-5.2 thinks by default: +5-15s/call AND it can
+                               # burn the whole max_tokens budget on reasoning,
+                               # returning EMPTY content. Off = fast + complete;
+                               # flip True for a hard-reasoning tier if ever needed.
 
 _MODEL_ALIASES = {  # CLI accepts aliases; the SDK needs real model ids
     # opus pinned to 4.7 (NOT the newest 4.8): same price ($5/$25 per 1M) and
@@ -124,6 +133,8 @@ class SingleCoder:
                 resp = client.chat.completions.create(
                     model=self.model, max_tokens=self.max_tokens,
                     temperature=_ZAI_TEMPERATURE,
+                    extra_body={"thinking": {"type":
+                        "enabled" if _ZAI_THINKING_ENABLED else "disabled"}},
                     messages=[{"role": "user", "content": prompt}])
                 content = (resp.choices[0].message.content or "").strip()
             except Exception as e:
