@@ -21,7 +21,9 @@ Axes:
                gate and NOT emitted to MLflow -- it is selection metadata only.
 """
 import ast
+import io
 import math
+import tokenize
 from dataclasses import dataclass, field, asdict
 
 
@@ -44,6 +46,11 @@ class MetricVector:
                                           # -- the deterministic cost meter (post-mortem
                                           # #5). NON-gated: cost-aware EXPORT re-pick only.
     code_complexity: float = 0.0
+    code_tokens: float = 0.0              # program SIZE in source tokens (the "K"
+                                          # axis of the value gate). User-chosen
+                                          # complexity unit -- tokens of code, not
+                                          # AST nodes -- so a doubling of source
+                                          # size is a literal 2x. Lower better.
     crashed_frac: float = 0.0
     crashed: bool = False
     recall_at_100: float = 0.0            # Phase C2 diagnostic axis (non-gated)
@@ -88,6 +95,7 @@ class MetricVector:
                    llm_calls=self.llm_calls, rerank_items=self.rerank_items,
                    recall_at_100=self.recall_at_100,
                    code_complexity=self.code_complexity,
+                   code_tokens=self.code_tokens,
                    usd_cost=self.usd_cost, tokens_in=self.tokens_in,
                    tokens_out=self.tokens_out,
                    crashed_frac=self.crashed_frac, crashed=float(self.crashed))
@@ -108,8 +116,8 @@ class MetricVector:
                 self.quality[k] = 0.0
                 bad = True
         for attr in ("latency_s", "db_load", "llm_calls", "rerank_items",
-                     "code_complexity", "crashed_frac", "recall_at_100",
-                     "usd_cost", "tokens_in", "tokens_out"):
+                     "code_complexity", "code_tokens", "crashed_frac",
+                     "recall_at_100", "usd_cost", "tokens_in", "tokens_out"):
             if not _is_finite_number(getattr(self, attr)):
                 setattr(self, attr, 0.0)
                 bad = True
@@ -154,3 +162,30 @@ def code_complexity(src: str) -> float:
     branches = sum(1 for x in ast.walk(tree)
                    if isinstance(x, (ast.If, ast.For, ast.While, ast.comprehension)))
     return float(n + 3 * branches)
+
+
+# Token kinds that carry no program size: layout, comments, and the structural
+# markers tokenize emits around them. Everything else (NAME/OP/NUMBER/STRING/
+# keywords) is real source the program pays for.
+_NOISE_TOKENS = frozenset((
+    tokenize.ENCODING, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+    tokenize.DEDENT, tokenize.COMMENT, tokenize.ENDMARKER,
+))
+
+
+def code_tokens(src: str) -> float:
+    """Program SIZE as a count of meaningful Python source tokens (NAME, OP,
+    NUMBER, STRING, keywords) -- the "K" axis the value gate penalizes. Tokens,
+    not lines, so reformatting/whitespace can't game it and a literal doubling of
+    code is a 2x. Comments and layout tokens don't count (free to document).
+    Unparseable source returns a large sentinel so a broken candidate looks
+    maximally complex (it will crash anyway). -> float (>= 1.0 for any real src)."""
+    if not src:
+        return 1.0
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return 1e6
+    n = sum(1 for t in toks
+            if t.type not in _NOISE_TOKENS and (t.string or "").strip())
+    return float(max(1, n))

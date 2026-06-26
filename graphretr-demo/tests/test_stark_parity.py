@@ -29,7 +29,10 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # graphretr-demo
 REPO_ROOT = os.path.dirname(ROOT)
-SEED_PATH = os.path.join(ROOT, "../starksearch/seeds/reasoning_first_v7.py")
+# The candidate is now a FileSet over starksearch/src; this is the editable
+# service file ported from the reasoning_first_v7 seed (parity reference).
+SEED_PATH = os.path.join(
+    REPO_ROOT, "starksearch/src/stark_search/stark_graph_search_service.py")
 GOLDEN = os.path.join(ROOT, "tests", "golden", "stark_parity_v7.json")
 
 pytestmark = pytest.mark.skipif(
@@ -71,7 +74,7 @@ def _production_path(src, idx):
         falkor_cfg={"host": cfg.falkor_host, "port": cfg.falkor_port,
                     "graph_name": cfg.graph_name},
         opt_src_dir=os.path.join(ROOT, "src"), repo_root=REPO_ROOT,
-        cfg_overrides={"root": cfg.root})
+        cfg_overrides={"root": cfg.root}, query_concurrency=1)
     reward = StarkRewardAdapter(sub, target, cfg.crash_frac_limit,
                                 default_timeout_s=cfg.probe_timeout_s)
     mv, rows = reward.score(None, [idx], src=src, return_rows=True,
@@ -87,7 +90,13 @@ def test_stark_subprocess_reproduces_golden():
     if not _falkor_up():
         pytest.skip("FalkorDB not reachable on :6380")
     from starksearch.qa import Substrate
-    src = open(SEED_PATH, encoding="utf-8").read()
+    from graphretr_opt.config import load_config
+    from graphretr_opt.artifact.file_set import FileSet
+    # The candidate is the whole editable service tree (FileSet over
+    # starksearch/src), exactly what the optimizer evolves -- not a src string.
+    cfg = load_config()
+    src = FileSet.from_base(cfg.stark_src_abs, cfg.stark_editable_files,
+                            family="stark_search")
     _query, q_id, _answer_ids = _fixed_query()
     gate = Substrate(meta_holdout_size=0).gate_idxs(
         os.path.join(ROOT, "runs", "_parity"), 1, 42)

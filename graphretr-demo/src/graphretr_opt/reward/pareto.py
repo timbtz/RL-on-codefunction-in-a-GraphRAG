@@ -5,6 +5,8 @@ Objectives (all "higher is better" after sign-flipping costs):
   - latency_s           (minimize -> negate)
   - db_load             (minimize -> negate)
   - code_complexity     (minimize -> negate)
+  - usd_cost            (minimize -> negate) -- real $/query (graph_search path;
+                        0 and inert on the function path, where no LLM is metered)
 
 `dominates` is the live primitive the CandidatePool (pool.py) and the gate
 (gate.py) build on. The passive `ParetoArchive`/MAP-Elites record that once sat
@@ -15,7 +17,8 @@ the active frontier now.
 
 
 def _objective_tuple(mv):
-    return (mv.primary, -mv.latency_s, -mv.db_load, -mv.code_complexity)
+    return (mv.primary, -mv.latency_s, -mv.db_load, -mv.code_complexity,
+            -mv.usd_cost)
 
 
 def dominates(a, b) -> bool:

@@ -136,7 +136,8 @@ class _FakeMutator:
         self.propose_calls = 0  # discriminates resume (skips done steps) from fresh
 
     def propose(self, prog, fails, wins, recent, L_t, plateau=False,
-                validate=None, repair_budget=0, accepted_entries=None):
+                validate=None, repair_budget=0, accepted_entries=None,
+                combine_with=None):
         self._n += 1
         self.propose_calls += 1
         cand = prog.with_src(prog.src + f"\n# edit {self._n}")

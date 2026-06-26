@@ -30,10 +30,19 @@ class Config:
     gate_size: int = 200
     gate_seed: int = 42
     gate_metric: str = "recall@20"          # axis used by 'strict' mode
-    gate_mode: str = "strict"               # strict | blend | dominance
-    gate_blend: str = "recall@20:0.6,mrr:0.4"  # weights for 'blend' mode
+    gate_mode: str = "strict"               # strict | blend | value | dominance
+    gate_blend: str = "recall@20:0.6,mrr:0.4"  # weights for 'blend'/'value' Q numerator
     gate_rotate_every: int = 0              # 0 = fixed gate; N = resample gate every N steps
     gate_max_complexity: float = 0.0        # 0 = off; else candidates above this AST-complexity are ineligible
+    gate_max_tokens: float = 0.0            # 0 = off; else candidates above this program-token size are ineligible (the enforced bloat wall)
+    # 'value' mode: V = Q / (usd_cost^cost_exp * code_tokens^complexity_exp).
+    # Exponents calibrated to break-even quality gains per resource doubling:
+    #   cost x2 -> +18.75% (2^0.248), complexity x2 -> +6.25% (2^0.0875).
+    # Cost penalized ~2.8x harder than complexity; both compound geometrically.
+    gate_cost_exp: float = 0.248            # alpha: $/query penalty exponent
+    gate_complexity_exp: float = 0.0875     # beta: code-token penalty exponent
+    gate_cost_floor: float = 5e-4           # floor C so cheap-side credit can't be gamed
+    gate_tokens_floor: float = 1.0          # floor K (every real program has >=1 token)
 
     # fast loop
     steps: int = 30
@@ -64,6 +73,18 @@ class Config:
     meta_holdout_size: int = 0     # B3: 0=off; else val queries fenced off from the gate
     meta_seed: int = 1234          # B3: seeds the meta-holdout partition
     meta_eval_every: int = 0       # B3: 0=off; else score best on the holdout every N accepts
+    # Cascaded promotion (run10c): a dedicated val slice -- disjoint from BOTH the
+    # gate pool AND the meta-holdout arbiter -- on which a gate-passing candidate is
+    # re-confirmed before the exported headline best moves. The cheap fixed gate
+    # makes a candidate eligible; this larger slice (noise guard) decides promotion.
+    promote_size: int = 0          # C: 0=off; else val queries fenced off as the promotion-confirm set
+    promote_seed: int = 5678       # seeds the promotion-slice partition (distinct from meta_seed)
+    promote_margin: float = 0.0    # min blend-composite gain on the promotion slice to move the exported best
+    # Generation restart (run10c): when a generation stalls (stop_after_stale steps
+    # with no promotion), instead of halting, restart from the Pareto set in COMBINE
+    # mode (the mutator synthesizes two Pareto members). 1 = no restart = old behaviour
+    # (stop on the first stall). The `steps` ceiling still bounds total work.
+    max_generations: int = 1
     select_holdout_n: int = 0      # Phase 1 final bake-off: 0=use full meta-holdout; else subsample to cap cost/latency
     select_cost_floor: float = 0.0 # 0.6b: cost-aware export band; 0=pure-quality argmax. Among finalists within
                                    # this much of the top holdout value, ship the cheapest by the rerank_items meter.
@@ -102,6 +123,16 @@ class Config:
 
     # strategy arm
     strategy: str = "vector_only"
+
+    # --- STaRK (function) target: the editable FileSet service tree ----------
+    # The STaRK candidate is now a whole FileSet over `starksearch/src` (the
+    # editable service file overlaid on the immutable base), run in an isolated
+    # subprocess exactly like graph_search -- NOT a sandboxed `search(q, G)`
+    # string. Mirrors graphsearch_src / editable_files below.
+    stark_src: str = "starksearch/src"     # base checkout the FileSet overlays
+    stark_editable_files: tuple = (
+        "stark_search/stark_graph_search_service.py",
+    )                                       # relpaths the mutator may edit (tuple => hashable)
 
     # --- graph_search target (the real agentic search service) --------------
     target: str = "function"               # function | graph_search
@@ -153,6 +184,12 @@ class Config:
 
     def _resolve(self, path):
         return path if os.path.isabs(path) else os.path.join(self.repo_root, path)
+
+    @property
+    def stark_src_abs(self):
+        """The STaRK service base tree (`starksearch/src`) the FileSet overlays,
+        resolved against the monorepo root (sibling of graphretr-demo)."""
+        return self._resolve(self.stark_src)
 
     @property
     def graphsearch_src_abs(self):
@@ -239,6 +276,8 @@ def load_config(**overrides) -> Config:
     kw.update(overrides)
     if isinstance(kw.get("editable_files"), list):  # yaml -> tuple (hashable)
         kw["editable_files"] = tuple(kw["editable_files"])
+    if isinstance(kw.get("stark_editable_files"), list):  # yaml -> tuple (hashable)
+        kw["stark_editable_files"] = tuple(kw["stark_editable_files"])
     return Config(**kw)
 
 

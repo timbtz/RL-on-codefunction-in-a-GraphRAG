@@ -9,5 +9,17 @@ Research/
 wiki
 graphsearch/data
 neo4j
-worker_stderr.txt
 .venv
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Stray text logs / scratch outputs (keep requirements files)
+*.txt
+!requirements.txt
+!**/requirements.txt

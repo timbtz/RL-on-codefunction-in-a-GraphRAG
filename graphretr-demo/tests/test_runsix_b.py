@@ -80,17 +80,30 @@ def test_minibatch_promotion():
 def test_meta_holdout_partition():
     s = Substrate.__new__(Substrate)        # bypass STaRK load
     s._val = list(range(2241))
-    holdout, pool = s._partition(300, 1234)
+    # promote off (pr_size=0): backward-compat -- holdout identical to the old
+    # 2-slice partition, the rest is the gate pool.
+    holdout, promote, pool = s._partition(300, 1234, 0, 5678)
     _check("meta: holdout has the requested size", len(holdout) == 300)
+    _check("meta: promote empty when pr_size=0", promote == [])
     _check("meta: holdout and gate pool are DISJOINT",
            set(holdout).isdisjoint(set(pool)))
     _check("meta: holdout + gate pool == val (no query lost or duplicated)",
            sorted(holdout + pool) == s._val)
-    h2, _ = s._partition(300, 1234)
+    h2, _, _ = s._partition(300, 1234, 0, 5678)
     _check("meta: partition deterministic for a fixed seed", holdout == h2)
-    empty, full = s._partition(0, 1234)
+    empty, pr0, full = s._partition(0, 1234, 0, 5678)
     _check("meta: size 0 leaves the whole val split as the gate pool (run-5 parity)",
-           empty == [] and full == s._val)
+           empty == [] and pr0 == [] and full == s._val)
+    # run10c cascade: three disjoint slices (meta-holdout, promote, gate pool).
+    mh, pr, gp = s._partition(300, 1234, 100, 5678)
+    _check("cascade: promote slice has the requested size", len(pr) == 100)
+    _check("cascade: all three slices are mutually DISJOINT",
+           set(mh).isdisjoint(pr) and set(mh).isdisjoint(gp)
+           and set(pr).isdisjoint(gp))
+    _check("cascade: the three slices partition val exactly",
+           sorted(mh + pr + gp) == s._val)
+    _check("cascade: meta-holdout idxs unchanged whether or not promote is carved",
+           mh == holdout)
 
 
 # ----------------------------------------------- failure attribution (B1/C2)

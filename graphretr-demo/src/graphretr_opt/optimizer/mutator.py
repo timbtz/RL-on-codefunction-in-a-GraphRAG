@@ -84,13 +84,24 @@ def _format_buffer(entries):
     return "\n".join(f"- step {e['step']}: {e['summary']}" for e in entries)
 
 
+_EFFICIENCY_LEGEND = (
+    "## How edits are scored -- value = quality / (cost^0.25 * size^0.09)\n"
+    "Each step line below reports `Δtok` (program size change in code tokens vs the "
+    "incumbent), `crash` (fraction of queries that errored/timed out), and `$/q` "
+    "(real dollars per query). These are NOT free: a more expensive or larger "
+    "program must EARN it with quality. To break even, doubling cost needs +18.75% "
+    "quality and doubling size needs +6.25%; a crash (crash>0.10) scores ZERO. So: "
+    "prefer the leanest, cheapest edit that moves recall/mrr; do not pile on graph "
+    "hops, rerank candidates, or LLM calls unless they pay for themselves.\n\n")
+
+
 def format_evidence(failures, wins, buffer_entries, accepted_entries=None):
     """The rollout evidence block -- what agent.digest() compresses."""
     won = ""
     if accepted_entries:
         won = ("## Edits that IMPROVED the metric so far -- build on these, do not undo them\n"
                + _format_buffer(accepted_entries) + "\n\n")
-    return f"""## Worst failures from the latest rollout (train queries)
+    return f"""{_EFFICIENCY_LEGEND}## Worst failures from the latest rollout (train queries)
 {_format_failures(failures)}
 
 {_format_wins(wins)}{won}## Previously rejected edits (did NOT improve the gate -- do not repeat)
@@ -98,8 +109,23 @@ def format_evidence(failures, wins, buffer_entries, accepted_entries=None):
 
 
 def build_prompt(incumbent_src, primitives_doc, digest, max_edits, safe_builtins,
-                 plateau=False):
+                 plateau=False, mate_src=None):
+    combine_block = ""
+    if mate_src is not None:
+        combine_block = f"""
+## A SECOND strong candidate (candidate B) -- a different point on the Pareto frontier
+B wins on queries the incumbent (candidate A) misses; it carries a mechanism A
+lacks. COMBINE them: graft B's winning operator into A so the result keeps A's
+strengths AND gains B's. Synthesize -- do not copy B wholesale.
+```python
+{mate_src}```
+"""
     stance = (
+        "COMBINE candidates A and B: identify the operator that lets B reach/rank "
+        "the gold A misses and graft it into A. This is a STRUCTURAL change -- a "
+        "wholesale rewrite (end with the COMPLETE module in one ```python block) "
+        "is encouraged."
+        if mate_src is not None else
         "You have STALLED for several steps -- small tweaks are not working. Make "
         "a BOLD, STRUCTURAL change this step: rewrite an operator end-to-end, "
         "replace the retrieval strategy, or add a new graph/hybrid recall path. Do "
@@ -130,7 +156,7 @@ retrieval is good enough -- it often is not.
 ## Current program (the incumbent)
 ```python
 {incumbent_src}```
-
+{combine_block}
 ## Execution contract (hard-enforced by an AST gate -- violations are auto-rejected)
 - The module must define `def search(q, G)`; helper functions and module-level
   constants are allowed. q is the query string, G the graph API below.
@@ -169,7 +195,13 @@ retrieval is good enough -- it often is not.
 """
 
 
-def build_search_prompt(file_set, primitives_doc, digest, max_edits):
+def _files_block(file_set):
+    return "\n\n".join(
+        f"FILE: {rel}\n```python\n{file_set.overlay[rel]}```"
+        for rel in file_set.editable if rel in file_set.overlay)
+
+
+def build_search_prompt(file_set, primitives_doc, digest, max_edits, mate=None):
     """Edit prompt for the `graph_search` target -- the real agentic search
     service file(s), not a sandboxed `def search(q, G)`. Renders each editable
     file under a `FILE:` header (the same header the multi-file applier reads
@@ -177,39 +209,43 @@ def build_search_prompt(file_set, primitives_doc, digest, max_edits):
     only contract is "the edited service still imports and `search(query) -> str`
     returns retrieved context" -- enforced by the subprocess eval seam, not a
     gate. `primitives_doc` here is a short domain note (Neo4j schema / cost
-    levers), not a `G.*` API."""
-    files_block = "\n\n".join(
-        f"FILE: {rel}\n```python\n{file_set.overlay[rel]}```"
-        for rel in file_set.editable if rel in file_set.overlay)
-    return f"""\
-You are optimizing a REAL agentic graph-retrieval service for a German company \
-knowledge graph (Neo4j fulltext + recursive traversal, no embeddings). Given a \
-natural-language query, `search(query) -> str` returns a retrieved-context \
-string with [doc:ID] citations. A separate, FROZEN answerer then picks a \
-multiple-choice answer from ONLY that context. You are scored on how often the \
-answerer is then correct (closed-book-adjusted) plus whether the gold source \
-document appears in your context -- minus cost (LLM calls / latency). So: surface \
-the RIGHT documents into the context; do not try to answer the question yourself.
+    levers), not a `G.*` API.
 
-## Domain notes
-{primitives_doc}
+    When `mate` (a second FileSet) is given, the prompt switches to COMBINE mode:
+    a second strong Pareto candidate is shown and the task becomes "synthesize the
+    best of both into candidate A" (run10c generation restart)."""
+    files_block = _files_block(file_set)
+    combine_block = task = ""
+    a_label = " -- candidate A" if mate is not None else ""
+    if mate is not None:
+        combine_block = f"""
+## A SECOND strong candidate (candidate B) -- a different point on the Pareto frontier
+Candidate B below is an ALTERNATIVE implementation of the SAME files. It survived
+because it wins on queries candidate A (above) does not -- it carries a mechanism A
+lacks. Your job this step is to COMBINE them: graft B's winning mechanism into A
+(the file(s) you edit) so the result keeps A's strengths AND gains B's. Synthesize,
+do not copy B wholesale, and do not just revert A to B.
 
-## Editable file(s) (the incumbent)
-{files_block}
-
-## How your change is evaluated
-- The edited file replaces the original inside a throwaway copy of the service,
-  which is imported and run over a gold Q&A set in an isolated subprocess.
-- A file that fails to import, crashes, or hangs scores as a crash for those
-  queries (the subprocess is killed on a wall-clock timeout). Prefer changes that
-  keep the service importable and the `search` signature intact.
-- Cheaper retrieval that keeps quality is rewarded (fewer LLM calls / lower
-  latency are cost axes).
-
-## Evidence (latest rollout -- per-question retrieval/answer outcomes)
-{digest}
-
-## Your task
+{_files_block(mate)}
+"""
+        task = """## Your task
+1. Compare candidate A and candidate B: name the concrete mechanism (a query, a
+   traversal, a filter, a prompt, a fusion step) that lets B reach or rank the gold
+   that A misses on the evidence below. State in a sentence or two what to graft.
+2. Produce your combined program as SEARCH/REPLACE blocks editing candidate A's
+   file(s). Each block:
+   FILE: <one of the editable relpaths above>
+   <<<<<<< SEARCH
+   <exact contiguous lines copied verbatim from candidate A>
+   =======
+   <the replacement lines>
+   >>>>>>> REPLACE
+   The SEARCH text must match candidate A EXACTLY and appear exactly once. The
+   FILE: header is required when more than one file is editable. A combine is a
+   STRUCTURAL change -- larger edits are expected; give a one-line rationale per block.
+"""
+    else:
+        task = f"""## Your task
 1. Diagnose in a few sentences WHY the answerer misses on these questions. Use the
    per-question signal: a RETRIEVAL miss (the gold source is absent from the
    returned context) needs broader/deeper traversal or better keyword extraction;
@@ -226,6 +262,35 @@ the RIGHT documents into the context; do not try to answer the question yourself
    FILE: header is required when more than one file is editable. Prefer small,
    targeted edits; give a one-line rationale per block.
 """
+    return f"""\
+You are optimizing a REAL agentic graph-retrieval service for a German company \
+knowledge graph (Neo4j fulltext + recursive traversal, no embeddings). Given a \
+natural-language query, `search(query) -> str` returns a retrieved-context \
+string with [doc:ID] citations. A separate, FROZEN answerer then picks a \
+multiple-choice answer from ONLY that context. You are scored on how often the \
+answerer is then correct (closed-book-adjusted) plus whether the gold source \
+document appears in your context -- minus cost (LLM calls / latency). So: surface \
+the RIGHT documents into the context; do not try to answer the question yourself.
+
+## Domain notes
+{primitives_doc}
+
+## Editable file(s) (the incumbent{a_label})
+{files_block}
+{combine_block}
+## How your change is evaluated
+- The edited file replaces the original inside a throwaway copy of the service,
+  which is imported and run over a gold Q&A set in an isolated subprocess.
+- A file that fails to import, crashes, or hangs scores as a crash for those
+  queries (the subprocess is killed on a wall-clock timeout). Prefer changes that
+  keep the service importable and the `search` signature intact.
+- Cheaper retrieval that keeps quality is rewarded (fewer LLM calls / lower
+  latency are cost axes).
+
+## Evidence (latest rollout -- per-question retrieval/answer outcomes)
+{digest}
+
+{task}"""
 
 
 class Mutator:
@@ -273,7 +338,7 @@ class Mutator:
 
     def propose(self, program: SearchProgram, failures, wins, buffer_entries,
                 edit_budget, plateau=False, validate=None, repair_budget=0,
-                accepted_entries=None):
+                accepted_entries=None, combine_with=None):
         """Propose an edit to `program` from the rollout evidence.
 
         -> (candidate SearchProgram or None, transcript:str, meta:dict) where
@@ -307,17 +372,21 @@ class Mutator:
             transcript.append(f"# DIGEST (analyst)\n\n{digest}")
 
         is_fs = _is_fileset(program)
-        # Bold mode on plateau: lift the edit budget so a wholesale restructure
-        # is not bounced as "over budget" (a full-module rewrite has a large edit
-        # distance), and tell the proposer to make a structural change.
-        eff_budget = 9999 if plateau else edit_budget
+        combine = combine_with is not None
+        # Bold mode on plateau OR combine: lift the edit budget so a wholesale
+        # restructure is not bounced as "over budget" (a full-module rewrite / a
+        # two-candidate synthesis has a large edit distance), and tell the proposer
+        # to make a structural change.
+        eff_budget = 9999 if (plateau or combine) else edit_budget
         if is_fs:
-            prompt = build_search_prompt(program, self._doc, digest, eff_budget)
+            prompt = build_search_prompt(program, self._doc, digest, eff_budget,
+                                         mate=combine_with)
         else:
             prompt = build_prompt(program.src, self._doc, digest, eff_budget,
-                                  self._safe_builtins, plateau=plateau)
+                                  self._safe_builtins, plateau=plateau,
+                                  mate_src=(combine_with.src if combine else None))
         transcript.append(f"# PROMPT\n\n{prompt}")
-        tier = "architect" if plateau else "editor"
+        tier = "architect" if (plateau or combine) else "editor"
         base_left = 2                       # parse + over-budget retries
         repairs_left = max(0, int(repair_budget))  # sandbox/probe repairs
         attempt = 0

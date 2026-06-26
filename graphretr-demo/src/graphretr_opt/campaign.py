@@ -1,10 +1,11 @@
 """Campaign -- the orchestrator. Owns all state and wires the two halves
 (env + optimizer) for the three entrypoints: stage0-probe, optimize, final-test.
 
-boot() dispatches on cfg.target: the STaRK (function) path assembles the env
-(backend -> RetrievalGraph -> Sandbox) + data/reward stack in-process; the
-graph_search path assembles the subprocess SearchTarget stack. Each entrypoint
-composes the optimizer pieces it needs on top, driving FastLoop directly.
+boot() dispatches on cfg.target: BOTH the STaRK (function) and graph_search paths
+now assemble a subprocess SearchTarget stack over a FileSet candidate (the
+editable service tree) -- the STaRK path over starksearch/src, the graph_search
+path over graphsearch/src. Each entrypoint composes the optimizer pieces it needs
+on top, driving FastLoop directly.
 """
 import os
 import random
@@ -12,7 +13,7 @@ import time
 from dataclasses import replace
 
 from .config import load_config, load_strategy, dump_resolved_config
-from .env.errors import SandboxError, SAFE_BUILTINS
+from .env.errors import SandboxError
 from .artifact.program import SearchProgram
 from .agents.single import SingleCoder
 from .agents.team import TieredCoder
@@ -21,12 +22,36 @@ from .optimizer.mutator import Mutator
 from .optimizer.fast_loop import FastLoop
 from .tracking.mlflow_tracker import MlflowTracker, maybe_enable_openai_tracing
 
-# NOTE: the function-campaign's heavy deps (Substrate->stark_qa, RewardModel->
-# torch, FalkorDBBackend->falkordb, RetrievalGraph/embedder->numpy) are imported
-# INSIDE boot() rather than at module top, so the graph_search path
-# (boot_search/optimize_search) can be imported and run on a machine that has
-# none of them installed. The function path is unchanged -- it just imports a
-# few ms later.
+# NOTE: the STaRK-campaign's heavy deps (Substrate->stark_qa->torch, the
+# StarkSubprocessTarget/StarkRewardAdapter, FileSet) are imported INSIDE boot()
+# rather than at module top, so the graph_search path (boot_search/
+# optimize_search) can be imported and run on a machine that has none of them
+# installed. The STaRK path is unchanged -- it just imports a few ms later.
+
+
+STARK_DOMAIN_NOTE = (
+    "Target: StarkGraphSearchService over the STaRK-prime biomedical knowledge "
+    "graph in FalkorDB (~129k nodes / ~8.1M directed typed edges; node label "
+    "'Entity', each node has .id (int), .ntype (str), .text (str), .embedding "
+    "(float[]); per-ntype vector-index labels expose ANN). The service is the "
+    "WHOLE editable pipeline: it is constructed with three injected clients --\n"
+    "  self._db.cypher(cypher, params) -> list[rows]   ONE read-only Cypher query.\n"
+    "  self._emb.encode(text) -> list[float]           query embedding (node model).\n"
+    "  self._llm(system, user, context_ids=None, model=None, max_tokens=600) -> dict\n"
+    "                                                  one metered+cached JSON LLM call.\n"
+    "and read-only allowlists self._db.labels / .rel_types / .ntypes. Every "
+    "method (_extract, _vector_search, _text_search, _llm_rerank, _reformulate, "
+    "_graph_recall, _get_neighbors, _filter_nodes) is yours to rewrite -- prompts, "
+    "Cypher, fusion math, new operators. Keep `search(self, query) -> dict[int, "
+    "float]` (node id -> score). Cost axes you are scored on: db_queries, "
+    "llm_calls, rerank_items (LLM context volume), latency.\n"
+    "HARD harness rules enforced on every self._db.cypher (a violation raises and "
+    "the query is scored as a miss): READ-ONLY only (no CREATE/MERGE/SET/DELETE/"
+    "REMOVE/DROP or write procs); always bound results with LIMIT; the vector "
+    "`score` is cosine DISTANCE so convert to similarity (1.0 - score); "
+    "algo.SPpaths must use maxLen<=3 (>=4 runs away and pegs the shared DB). "
+    "Prefer algo.bfs for multi-hop recall."
+)
 
 
 SEARCH_DOMAIN_NOTE = (
@@ -59,56 +84,65 @@ class Campaign:
         return self._boot_function()
 
     def _boot_function(self):
+        """Assemble the STaRK stack -- mirrors boot_search. The candidate is now a
+        whole FileSet over `starksearch/src` (the editable service file overlaid
+        on the immutable base), scored in an isolated subprocess by
+        StarkSubprocessTarget. NO in-process FalkorDB / RetrievalGraph / AST gate
+        here: the FalkorDB + embedder + metered LLM are injected and metered in the
+        worker harness, and the container-protecting caps + SPpaths/write firewall
+        live in that harness's read-only DB proxy (`stark_harness.qa_runner`)."""
         cfg = self.cfg
-        # The STaRK service lives in the sibling `starksearch/` package (carved out
-        # of the engine 2026-06-25). Put the monorepo root on sys.path so it
-        # resolves, exactly as the graph_search path inserts graphsearch/src.
+        # The STaRK service lives in the sibling `starksearch/` package. Put the
+        # monorepo root on sys.path so it resolves, exactly as boot_search does for
+        # graphsearch/src.
         import sys
         if cfg.repo_root not in sys.path:
             sys.path.insert(0, cfg.repo_root)
-        # function-campaign deps imported lazily (see module-top note)
         from starksearch.qa import Substrate
-        from starksearch.backends.falkordb import FalkorDBBackend
-        from starksearch.cache import PrimitiveCache
-        from starksearch.embedder import make_embedder
-        from .env.openai_client import OpenAIBudget
-        from starksearch.graph import RetrievalGraph
-        from .env.null_sandbox import NullSandbox
+        from .env.null_sandbox import NullGraph, NullSandbox
         from .env.targets.stark_subprocess_target import StarkSubprocessTarget
         from starksearch.reward import StarkRewardAdapter
-        backend = FalkorDBBackend(cfg.falkor_host, cfg.falkor_port, cfg.graph_name)
-        # One shared metered OpenAI gateway for the embedder AND G.extract;
-        # without a key both stay disabled and the minilm path works as before.
-        budget = None
-        if os.environ.get("OPENAI_API_KEY"):
-            budget = OpenAIBudget(os.path.join(cfg.runs_dir, "openai_usage.json"),
-                                  ceiling_usd=cfg.openai_budget_usd)
-            print(f"[campaign] openai budget: ${budget.spent_usd:.2f} spent of "
-                  f"${cfg.openai_budget_usd:.2f} ceiling (embedder={cfg.embedder})")
-        self.budget = budget  # shared OpenAI gateway; FastLoop reads it for per-step cost
-        # The in-process G is kept for the TRUSTED utilities the loop reads
-        # directly -- the mutator's primitives doc (G.describe) and the reflection
-        # node text (G.get_text). Candidate EXECUTION no longer runs in-process:
-        # the AST Sandbox is gone (deleted with the carve-out, 2026-06-25) and
-        # candidates are scored in a worker subprocess (StarkSubprocessTarget),
-        # exactly like graph_search. Isolation = the process boundary + wall-clock
-        # kill, not an in-process gate; the FalkorDB-protecting caps live in
-        # starksearch.primitives.
-        self.graph = RetrievalGraph(cfg, backend, PrimitiveCache(),
-                                    make_embedder(cfg, budget), llm_budget=budget)
-        self.sandbox = NullSandbox()  # no AST gate / in-process exec on this path
+        from .artifact.file_set import FileSet
+
+        # The function seed file is far larger than the old `search(q, G)` string,
+        # so the AST complexity cap is meaningless here -- turn it OFF. The bloat
+        # wall is now the value gate's TOKEN cap (set below, seed-relative), which
+        # is the run10c-spiral fix; the AST axis stays a Pareto diagnostic only.
+        self.cfg = cfg = replace(cfg, gate_max_complexity=0.0)
+
         self.substrate = Substrate(meta_holdout_size=cfg.meta_holdout_size,
-                                   meta_seed=cfg.meta_seed)
+                                   meta_seed=cfg.meta_seed,
+                                   promote_size=getattr(cfg, "promote_size", 0),
+                                   promote_seed=getattr(cfg, "promote_seed", 5678))
         target = StarkSubprocessTarget(
             falkor_cfg={"host": cfg.falkor_host, "port": cfg.falkor_port,
                         "graph_name": cfg.graph_name},
             opt_src_dir=cfg.opt_src_abs, repo_root=cfg.repo_root,
-            # worker rebuilds G from campaign.yaml+env; pass root so it reads the
-            # SAME config + shares the runs_dir primitive caches.
-            cfg_overrides={"root": cfg.root})
+            # the worker rebuilds the harness clients from campaign.yaml+env; pass
+            # root so it reads the SAME config + shares the runs_dir LLM cache.
+            cfg_overrides={"root": cfg.root},
+            query_concurrency=cfg.query_concurrency)
         self.reward = StarkRewardAdapter(self.substrate, target,
                                          cfg.crash_frac_limit,
                                          default_timeout_s=cfg.probe_timeout_s)
+        # The candidate IS the editable service tree (string seed -> FileSet).
+        self.seed = FileSet.from_base(cfg.stark_src_abs, cfg.stark_editable_files,
+                                      family="stark_search")
+        # Enforced bloat wall: when the value gate is active, default the token cap
+        # to ~1.3x the seed's program size unless the campaign set one explicitly.
+        # This caps the run10c spiral (2716 -> 4607) while leaving room to grow.
+        if cfg.gate_mode == "value" and not getattr(cfg, "gate_max_tokens", 0.0):
+            from .reward.objectives import code_tokens
+            seed_tokens = code_tokens(self.seed.src_of(self.seed.primary_file))
+            self.cfg = cfg = replace(cfg, gate_max_tokens=round(seed_tokens * 1.3))
+            print(f"[campaign] value gate: seed tokens={seed_tokens:.0f} -> "
+                  f"max_tokens cap={cfg.gate_max_tokens:.0f}")
+        self.sandbox = NullSandbox()  # no AST gate / in-process exec on this path
+        self.graph = NullGraph()      # reflection get_text is inert (rows carry it)
+        self.budget = None            # OpenAI metering is in the subprocess, not here
+        print(f"[campaign] stark seed sha={self.seed.sha[:8]} "
+              f"editable={list(self.seed.editable)} "
+              f"base={cfg.stark_src_abs}")
         return self
 
     def _make_mutator(self):
@@ -120,11 +154,17 @@ class Campaign:
         else:
             agent = SingleCoder(cfg.mutator_backend, cfg.mutator_model,
                                 cfg.llm_timeout_s)
-        return Mutator(agent, self.graph.describe(), SAFE_BUILTINS)
+        # FileSet path: a static domain note (the service API + firewall rules),
+        # and safe_builtins={} (no AST gate to advertise) -- mirrors
+        # _make_search_mutator. The mutator duck-types the FileSet itself.
+        return Mutator(agent, STARK_DOMAIN_NOTE, safe_builtins={})
 
     def _seed_program(self):
-        strat = load_strategy(self.cfg)
-        return SearchProgram.from_file(strat["seed"], family=strat["family"])
+        """The STaRK seed is the FileSet built in boot(); the entrypoints below
+        (optimize/stage0/final/ablate) score it via `self.reward.score(..., src=
+        p.src)` and FileSet.src returns the FileSet itself, so their call sites are
+        unchanged."""
+        return self.seed
 
     def _probe_queries(self, n=3):
         idxs = random.Random(self.cfg.gate_seed).sample(self.substrate.train_idxs, n)
@@ -460,7 +500,11 @@ class Campaign:
         if not os.path.exists(best_path):
             raise SystemExit(f"no best_search.py in {run_dir} -- run optimize first")
         seed = self._seed_program()
-        best = SearchProgram.from_file(best_path, family=seed.family)
+        # `best_search.py` holds the accepted PRIMARY editable file (FileSet.save);
+        # rebuild the best as a FileSet over the same base with that file overlaid,
+        # so the subprocess target can materialize + run it like any candidate.
+        best = seed.with_overlay({seed.primary_file:
+                                  open(best_path, encoding="utf-8").read()})
         seed_fn = self.sandbox.compile(seed.src)
         best_fn = self.sandbox.compile(best.src)
         test_idxs = self.substrate.get_test_idxs_I_KNOW_THIS_IS_FINAL()

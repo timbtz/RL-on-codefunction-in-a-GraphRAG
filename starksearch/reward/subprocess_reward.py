@@ -16,8 +16,32 @@ The scoring/row logic is byte-for-byte the old RewardModel's, with the per-query
 """
 import torch
 
-from graphretr_opt.reward.objectives import MetricVector, code_complexity
+from graphretr_opt.reward.objectives import (
+    MetricVector, code_complexity, code_tokens)
 from .evaluator import QUALITY_KEYS
+
+
+def _primary_src(src) -> str:
+    """The candidate's PRIMARY editable-file source as a string. `src` is a
+    FileSet (the editable service tree); a plain string (legacy / tests) flows
+    straight through. -> str ('' when src is None)."""
+    if src is None:
+        return ""
+    if hasattr(src, "overlay"):                       # FileSet
+        return src.src_of(src.primary_file)
+    return src
+
+
+def _src_complexity(src) -> float:
+    """AST-complexity proxy (Pareto diagnostic axis)."""
+    s = _primary_src(src)
+    return code_complexity(s) if s else 0.0
+
+
+def _src_tokens(src) -> float:
+    """Program SIZE in source tokens -- the value gate's "K" complexity axis."""
+    s = _primary_src(src)
+    return code_tokens(s) if s else 0.0
 
 
 class StarkRewardAdapter:
@@ -53,6 +77,7 @@ class StarkRewardAdapter:
         rows = []
         crashed = 0
         lat_sum = q_sum = llm_sum = rerank_sum = 0.0
+        usd_sum = tin_sum = tout_sum = 0.0
         for idx, query, q_id, answer_ids in examples:
             r = results.get(query) or {"pred": {}, "cost": {}, "error": "no result"}
             row = {"idx": idx, "q_id": q_id, "query": query,
@@ -62,6 +87,12 @@ class StarkRewardAdapter:
             q_sum += float(cost.get("db_queries", 0))
             llm_sum += float(cost.get("llm_calls", 0))
             rerank_sum += float(cost.get("rerank_items", 0))
+            # The CostSink already meters real $ + tokens per query (the worker
+            # snapshots it into `cost`); the old adapter dropped them on the floor.
+            # Sum them so usd_cost lands on the vector -> Pareto axis + value gate.
+            usd_sum += float(cost.get("usd_cost", 0.0))
+            tin_sum += float(cost.get("tokens_in", 0))
+            tout_sum += float(cost.get("tokens_out", 0))
             pred = r.get("pred") or {}
             if r.get("error") or not pred:
                 crashed += 1
@@ -97,7 +128,11 @@ class StarkRewardAdapter:
             db_load=q_sum / n,
             llm_calls=llm_sum / n,
             rerank_items=rerank_sum / n,
-            code_complexity=code_complexity(src) if src else 0.0,
+            code_complexity=_src_complexity(src),
+            code_tokens=_src_tokens(src),
+            usd_cost=usd_sum / n,
+            tokens_in=tin_sum / n,
+            tokens_out=tout_sum / n,
             crashed_frac=crashed / n,
             recall_at_100=sum(r.get("recall@100", 0.0) for r in rows) / n,
             per_query=per_query,
