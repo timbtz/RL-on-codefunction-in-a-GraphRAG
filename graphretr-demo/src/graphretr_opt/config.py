@@ -89,6 +89,10 @@ class Config:
     select_holdout_n: int = 0      # Phase 1 final bake-off: 0=use full meta-holdout; else subsample to cap cost/latency
     select_cost_floor: float = 0.0 # 0.6b: cost-aware export band; 0=pure-quality argmax. Among finalists within
                                    # this much of the top holdout value, ship the cheapest by the rerank_items meter.
+    select_timeout_s: float = 60.0 # Phase 1 final bake-off per-query timeout. The meta-holdout is scored ONCE at the
+                                   # very end with a COLD llm cache, so the tight in-loop probe_timeout_s (gate queries
+                                   # warm over the run) starves cold Gemini-rerank calls -> every query crashes -> the
+                                   # run12 0.0 headline. Give the one-shot bake-off room; the loop probe stays tight.
 
     # hard caps / safety walls
     query_timeout_ms: int = 2000

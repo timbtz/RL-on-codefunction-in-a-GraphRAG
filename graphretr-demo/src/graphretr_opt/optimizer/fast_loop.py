@@ -310,7 +310,9 @@ class FastLoop:
                 break
             try:
                 mv = self._reward.score(get_fn(p), sel_idxs, src=p.src,
-                                        per_query_timeout_s=cfg.probe_timeout_s)
+                                        per_query_timeout_s=(getattr(
+                                            cfg, "select_timeout_s", None)
+                                            or cfg.probe_timeout_s))
             except BudgetExceeded as e:
                 print(f"[fast_loop] final bake-off: BudgetExceeded ({e}) -- "
                       f"falling back to best scored so far")

@@ -26,6 +26,8 @@ Hard rules (eval hygiene + container safety):
 import json
 import os
 import re
+import tempfile
+import threading
 import time
 from dataclasses import dataclass
 
@@ -195,6 +197,13 @@ class LlmClient:
         self._db = db
         self._disk = os.path.join(runs_dir, "llm_cache.json")
         self._mem = None
+        # query_concurrency>1 runs N threads in ONE process (shared PID), so a
+        # PID-suffixed temp file is NOT unique across threads: two threads write
+        # the same temp, one renames it away, the other's os.replace() then dies
+        # FileNotFoundError -- which the reward path counts as a per-query crash
+        # (the run12 meta-holdout 0.0). Serialize the dict mutation + flush, and
+        # use a per-write unique temp, so concurrent rerank calls can't collide.
+        self._lock = threading.Lock()
 
     def __call__(self, system, user, context_ids=None, model=None,
                  max_tokens=600) -> dict:
@@ -221,7 +230,9 @@ class LlmClient:
             lines = "\n".join(f"[{nid}] {texts.get(nid, '')[:500]}" for nid in ctx_ids)
             full_user = f"{user}\n\nNodes:\n{lines}"
         if self._mem is None:
-            self._mem = self._load_disk()
+            with self._lock:
+                if self._mem is None:
+                    self._mem = self._load_disk()
         ckey = "\x00".join([model, system, full_user])
         hit = self._mem.get(ckey)
         if hit is not None:
@@ -229,16 +240,26 @@ class LlmClient:
         raw = self._budget.chat_json(system, full_user, model=model,
                                      max_tokens=max_tokens)
         raw = raw if isinstance(raw, dict) else {}
-        self._mem[ckey] = raw
         os.makedirs(os.path.dirname(self._disk), exist_ok=True)
-        # Atomic write: dump to a temp file then rename, so a kill mid-write can
-        # never truncate the cache into the corrupt-JSON state that crashes the
+        # Atomic write: dump to a unique temp file then rename, so a kill mid-write
+        # can never truncate the cache into the corrupt-JSON state that crashes the
         # next run on load (that exact failure mode produced runs/llm_cache.json
-        # corruption after run10c was killed).
-        tmp = f"{self._disk}.tmp.{os.getpid()}"
-        with open(tmp, "w") as f:
-            json.dump(self._mem, f)
-        os.replace(tmp, self._disk)
+        # corruption after run10c was killed). The lock + per-write temp make this
+        # thread-safe under query_concurrency>1 (a shared-PID temp used to collide).
+        with self._lock:
+            self._mem[ckey] = raw
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self._disk),
+                                       prefix="llm_cache.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(self._mem, f)
+                os.replace(tmp, self._disk)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
         return json.loads(json.dumps(raw))
 
     def _load_disk(self) -> dict:
