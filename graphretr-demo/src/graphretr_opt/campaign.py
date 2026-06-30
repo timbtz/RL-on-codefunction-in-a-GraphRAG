@@ -128,6 +128,16 @@ class Campaign:
         # The candidate IS the editable service tree (string seed -> FileSet).
         self.seed = FileSet.from_base(cfg.stark_src_abs, cfg.stark_editable_files,
                                       family="stark_search")
+        # Seed-from-champion (archipelago seed-chaining): overlay a saved
+        # champion's primary file onto the fresh-from-base seed so the run
+        # continues a prior run's best. Mirrors the final_test reload pattern
+        # (campaign.final_test: seed.with_overlay({seed.primary_file: ...})).
+        if getattr(cfg, "seed_champion_path", ""):
+            champ = open(cfg.seed_champion_path, encoding="utf-8").read()
+            self.seed = self.seed.with_overlay({self.seed.primary_file: champ})
+            print(f"[campaign] seed overlaid from champion "
+                  f"{cfg.seed_champion_path} -> seed sha={self.seed.sha[:8]}",
+                  flush=True)
         # Enforced bloat wall: when the value gate is active, default the token cap
         # to ~1.3x the seed's program size unless the campaign set one explicitly.
         # This caps the run10c spiral (2716 -> 4607) while leaving room to grow.
@@ -178,6 +188,14 @@ class Campaign:
         edit_budget = EditBudget(cfg.edit_schedule, cfg.max_edits, cfg.min_edits, steps)
         mutator = self._make_mutator()
         seed = self._seed_program()
+        # Merge warm-start (archipelago tournament-merge): overlay each champion
+        # in merge_seed_paths onto a fresh seed FileSet so the pool starts with
+        # >=2 distinct champions and the loop forces COMBINE mode. Empty by
+        # default => non-merge runs are byte-identical to before.
+        seed_pool = []
+        for p in getattr(cfg, "merge_seed_paths", ()) or ():
+            src = open(p, encoding="utf-8").read()
+            seed_pool.append(self.seed.with_overlay({self.seed.primary_file: src}))
         run_dir = os.path.join(cfg.runs_dir, campaign)
         os.makedirs(run_dir, exist_ok=True)
         cfg_path, cfg_hash = dump_resolved_config(cfg, run_dir)
@@ -191,7 +209,8 @@ class Campaign:
                               "config_hash": cfg_hash})
             loop = FastLoop(cfg, self.graph, self.sandbox, self.reward, mutator,
                             edit_budget, tracker, budget=self.budget)
-            result = loop.run(self.substrate, seed, steps, campaign)
+            result = loop.run(self.substrate, seed, steps, campaign,
+                              seed_pool=seed_pool)
             tracker.log_artifacts(run_dir)
         print(f"[campaign] best program -> {os.path.join(run_dir, 'best_search.py')}")
         return result

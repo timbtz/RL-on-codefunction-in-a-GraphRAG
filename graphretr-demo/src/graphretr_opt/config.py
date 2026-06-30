@@ -138,6 +138,16 @@ class Config:
     stark_editable_files: tuple = (
         "stark_search/stark_graph_search_service.py",
     )                                       # relpaths the mutator may edit (tuple => hashable)
+    # --- archipelago cross-run seeding (DAG meta-orchestrator) ---------------
+    # seed_champion_path: overlay a saved champion's primary file onto the seed
+    # FileSet so a run continues a prior run's best (seed-chaining). merge +
+    # merge_seed_paths: warm-start the candidate pool with >=2 champions and force
+    # COMBINE mode from step 0 (the tournament-merge primitive). All empty/false
+    # => today's behaviour (seed from the on-disk base, no merge). Paths are file
+    # paths to a champion's primary editable file (e.g. runs/<name>/best_search.py).
+    seed_champion_path: str = ""
+    merge: bool = False
+    merge_seed_paths: tuple = ()            # tuple => hashable; yaml list coerced below
 
     # --- graph_search target (the real agentic search service) --------------
     target: str = "function"               # function | graph_search
@@ -309,6 +319,8 @@ def load_config(**overrides) -> Config:
         kw["editable_files"] = tuple(kw["editable_files"])
     if isinstance(kw.get("stark_editable_files"), list):  # yaml -> tuple (hashable)
         kw["stark_editable_files"] = tuple(kw["stark_editable_files"])
+    if isinstance(kw.get("merge_seed_paths"), list):  # yaml -> tuple (hashable)
+        kw["merge_seed_paths"] = tuple(kw["merge_seed_paths"])
     # The z.ai backend speaks GLM, not Claude: default any leftover claude-*
     # model slug to glm-5.2 so MUTATOR_BACKEND=zai alone is sufficient and a
     # stale claude slug can't 404. A non-claude slug the user set is respected.

@@ -1,0 +1,40 @@
+# archipelago.yaml -- DAG meta-orchestrator campaign spec.
+#
+# Drives many `optimize` runs as an island-model search: each BRANCH seed-chains
+# (run's champion -> next run's seed) until it stops improving, then a tournament
+# MERGE bracket combines branch champions pairwise (each pair -> one --merge run
+# that warm-starts both into the pool and runs COMBINE mode) down to one global
+# champion. Sequential ONLY (shared FalkorDB + llm_cache).
+#
+#   plan (no spend): cli archipelago --spec configs/archipelago.yaml --dry-run
+#   run:             cli archipelago --spec configs/archipelago.yaml
+#   resume:          cli archipelago --spec configs/archipelago.yaml --resume
+
+campaign: archipelago        # runs/<campaign>/ holds the DAG (archipelago_graph.json, graph.dot)
+branches: 5                  # N independent seed lineages explored in parallel directions
+
+seed: base                   # 'base' = every branch starts from the on-disk service file.
+                             # OR a per-branch list of champion paths, e.g.:
+                             #   seed:
+                             #     - runs/run10c/best_search.py
+                             #     - base
+
+# Optional: push branches in different technical directions. Index i -> branch i.
+# Names must be configs/strategies/<name>.yaml (passed as `optimize --strategy`).
+strategy_per_branch: []      # e.g. [vector_only, hybrid_rrf, extract_first]
+
+run:
+  steps: 20                  # per-run backstop ceiling (stop_after_stale ends earlier)
+  checkpoint_every: 5        # atomically snapshot the live pool every N steps
+
+converge:
+  metric: holdout_value      # the select_holdout.json bake-off currency
+  margin: 0.01               # a run's champion must beat its seed by this to keep chaining
+  max_runs_per_branch: 4     # safety cap on chain length
+
+merge:
+  policy: tournament         # pairwise (1,2)(3,4)... -> winners, recursively
+
+execution:
+  mode: sequential           # ONLY supported mode (one FalkorDB + one llm_cache)
+  budget_usd: 25             # hard ceiling on INCREMENTAL spend (vs runs/openai_usage.json at start)

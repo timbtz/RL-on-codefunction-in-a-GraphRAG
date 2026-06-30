@@ -468,7 +468,8 @@ class FastLoop:
             return None
         return blob
 
-    def run(self, substrate, seed_program, steps, campaign) -> ArmResult:
+    def run(self, substrate, seed_program, steps, campaign,
+            seed_pool=None) -> ArmResult:
         cfg = self._cfg
         run_dir = os.path.join(cfg.runs_dir, campaign)
         acc_dir = os.path.join(run_dir, "accepted")
@@ -592,6 +593,39 @@ class FastLoop:
             print(f"[fast_loop] seed gate ({time.time()-t0:.0f}s): "
                   f"{ {k: round(v, 4) for k, v in best.quality.items()} }"
                   + (f"  [pool ON cap={pool_cap}]" if pool_on else "  [single incumbent]"))
+            # Merge warm-start (archipelago tournament-merge): admit each champion
+            # in seed_pool into the breeding pool so COMBINE has >=2 distinct
+            # parents from step 0. Score on the SAME gate_idxs as the seed so the
+            # per_query keys align for sole-best counting (pool._sole_best_counts).
+            # A champion from a different architecture may exceed the token wall;
+            # lift it for warm-start admission only (these are real champions, not
+            # bloat candidates), then restore so later mutations still face it.
+            if seed_pool:
+                saved_wall = pool.max_tokens
+                pool.max_tokens = 0.0
+                for wp in seed_pool:
+                    if wp.sha in pool.shas():
+                        continue
+                    wfn = self._sandbox.compile(wp.src)
+                    self._sandbox.probe(wfn, probes, cfg.probe_timeout_s)
+                    fn_cache[wp.sha] = wfn
+                    wmv = cache.get(_ckey(wp.sha))
+                    if wmv is None:
+                        wmv = self._reward.score(wfn, gate_idxs, src=wp.src,
+                                                 per_query_timeout_s=cfg.probe_timeout_s)
+                        cache.put(_ckey(wp.sha), wmv)
+                    if getattr(wmv, "crashed", False):
+                        print(f"[fast_loop] merge warm-start {wp.sha[:8]} CRASHED "
+                              f"-- not admitted", flush=True)
+                        continue
+                    admitted = pool.consider(wp, wmv)[1]
+                    print(f"[fast_loop] merge warm-start {wp.sha[:8]} "
+                          f"recall@20={wmv.get('recall@20'):.4f} "
+                          f"admitted={admitted}", flush=True)
+                pool.max_tokens = saved_wall
+                if bool(getattr(cfg, "merge", False)) and len(pool) < 2:
+                    print("[fast_loop] merge: <2 distinct champions admitted; "
+                          "combine inert (degrades to single-seed run)", flush=True)
         # Incumbent's promotion-slice score (run10c): the bar a candidate must
         # clear by `promote_margin` to move the exported best. Computed once here
         # (cache hit on resume); not stored in the checkpoint -- the 'promote:' key
@@ -617,7 +651,10 @@ class FastLoop:
         # entered. max_generations=1 (default) => first stall stops (old behaviour).
         max_generations = int(getattr(cfg, "max_generations", 1) or 1)
         generation = gen_resume
-        combine_mode = generation > 0
+        # Force COMBINE from step 0 on a merge run (archipelago tournament-merge):
+        # the pool is warm-started below with >=2 champions, so the mutator should
+        # synthesize two members from the start, not wait for a generation stall.
+        combine_mode = generation > 0 or bool(getattr(cfg, "merge", False))
 
         # --- auditability baselines (Phase B cost split, Phase C lineage) ----
         # Snapshot the budget AFTER seed scoring + embedder warmup so warmup spend
