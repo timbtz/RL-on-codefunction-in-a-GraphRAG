@@ -1,6 +1,6 @@
 # Strategy family "vector_only" -- the deliberately-naive Stage-1 arm.
 family: vector_only
-seed: src/graphretr_opt/artifact/seeds/vector_only.py
+seed: ../starksearch/seeds/vector_only.py
 notes: >
   Pure ANN over node-text embeddings, no graph structure. Chosen as the seed
   precisely because it leaves headroom that only graph-aware composition can

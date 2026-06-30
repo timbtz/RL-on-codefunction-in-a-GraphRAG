@@ -1,17 +1,19 @@
-"""graphretr_opt -- optimizer service that rewrites a search program over a
-frozen graph environment (LLM frozen, artifact = code).
+"""graphretr_opt -- target-agnostic optimizer ENGINE that rewrites a search
+program/service over a frozen graph environment (LLM frozen, artifact = code).
 
-Two long-lived halves with a hard wall between them:
-  env/        the immutable environment: graph backend + closed primitive DSL
-              + sandbox. Never mutated by the loop.
-  optimizer/  the "RL" half: proposes bounded edits, scores against the env,
+The engine drives two sibling search SERVICES (carved out 2026-06-25): the STaRK
+service in `starksearch/` and the company-KG service in `graphsearch/`. What
+remains here is the machinery both reuse:
+  optimizer/  the "RL" half: proposes bounded edits, scores against the target,
               gates, archives. SkillOpt mechanisms live here.
+  env/        the eval seam: the SearchTarget port + subprocess targets, the
+              shared LLM/budget gateway, the stable SandboxError, and (until the
+              STaRK path goes subprocess) the in-process AST Sandbox.
+  reward/     the scoring FRAMEWORK (MetricVector, pareto dominance) -- per-target
+              scorers live with their service.
 
-The artifact that flows between them is artifact/program.py:SearchProgram
-(layer 2 of the three-layer model) -- never the primitives (layer 1) or the
-strategy family (layer 3, slow loop).
-
-Stage 1 (this demo) drives optimizer/fast_loop.py via campaign.py/cli.py and
-leaves slow_loop, scheduler and gepa_adapter as documented seams for the
-deferred cross-strategy exploration layer.
+The artifact that flows through the loop is a SearchProgram (single-file) or a
+FileSet (multi-file service overlay). Stage 1 drives optimizer/fast_loop.py via
+campaign.py/cli.py; the cross-strategy slow-loop layer is deferred (its inert
+stubs were removed 2026-06-25 -- recoverable from git when Stage 2 ships).
 """

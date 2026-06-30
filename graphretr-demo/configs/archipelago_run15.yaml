@@ -1,0 +1,41 @@
+# archipelago_run15.yaml -- continue from run14_glm's 3 accepted champions.
+#
+# 3 branches, each seeded from one run14_glm accepted step. Each branch
+# seed-chains (improves) until it stops beating its seed by `margin`, then the
+# tournament merge bracket combines the branch champions (COMBINE mode) down to
+# one global champion. Sequential ONLY (shared FalkorDB + llm_cache).
+#
+#   plan (no spend): python -m graphretr_opt.cli archipelago --spec configs/archipelago_run15.yaml --dry-run
+#   run:             python -m graphretr_opt.cli archipelago --spec configs/archipelago_run15.yaml
+#   resume:          python -m graphretr_opt.cli archipelago --spec configs/archipelago_run15.yaml --resume
+
+campaign: run15_archipelago
+
+branches: 3
+
+# Per-branch champion seeds (index i -> branch i). These are full copies of the
+# editable service file at each accepted step, so they plug straight in.
+seed:
+  - runs/run14_glm/accepted/step_002.py   # best hit@1 / mrr
+  - runs/run14_glm/accepted/step_010.py   # best recall@20 / recall@100
+  - runs/run14_glm/accepted/step_004.py   # middle
+
+# Push the branches in different technical directions so the merge has real
+# diversity to combine. Names map to configs/strategies/<name>.yaml.
+strategy_per_branch: [reasoning_first_v7, hybrid_rrf, extract_first]
+
+run:
+  steps: 40
+  checkpoint_every: 5
+
+converge:
+  metric: holdout_value
+  margin: 0.01
+  max_runs_per_branch: 3
+
+merge:
+  policy: tournament
+
+execution:
+  mode: sequential
+  budget_usd: 25

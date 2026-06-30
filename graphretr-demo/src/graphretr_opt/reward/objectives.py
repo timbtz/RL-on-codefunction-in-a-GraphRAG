@@ -21,21 +21,24 @@ Axes:
                gate and NOT emitted to MLflow -- it is selection metadata only.
 """
 import ast
+import io
 import math
+import tokenize
 from dataclasses import dataclass, field, asdict
 
 
 def _is_finite_number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
-# hit@5 added for the Hit@1 push: the leaderboard reports it and it shows rank
-# movement the binary hit@1 misses. recall@20 stays the Pareto/'primary' axis.
-QUALITY_KEYS = ("recall@20", "hit@1", "hit@5", "mrr")
-
 
 @dataclass
 class MetricVector:
-    quality: dict = field(default_factory=lambda: {k: 0.0 for k in QUALITY_KEYS})
+    # The quality axis NAMES are target-specific and owned by the per-target
+    # reward (STaRK: starksearch.reward.QUALITY_KEYS; MCQ: qa_objectives.
+    # MCQ_QUALITY_KEYS). The framework stays agnostic: a bare vector starts with
+    # an empty quality dict and `primary` reads whichever axis `primary_key`
+    # names. The reward always constructs MetricVector with an explicit `quality`.
+    quality: dict = field(default_factory=dict)
     latency_s: float = 0.0
     db_load: float = 0.0
     llm_calls: float = 0.0
@@ -43,6 +46,11 @@ class MetricVector:
                                           # -- the deterministic cost meter (post-mortem
                                           # #5). NON-gated: cost-aware EXPORT re-pick only.
     code_complexity: float = 0.0
+    code_tokens: float = 0.0              # program SIZE in source tokens (the "K"
+                                          # axis of the value gate). User-chosen
+                                          # complexity unit -- tokens of code, not
+                                          # AST nodes -- so a doubling of source
+                                          # size is a literal 2x. Lower better.
     crashed_frac: float = 0.0
     crashed: bool = False
     recall_at_100: float = 0.0            # Phase C2 diagnostic axis (non-gated)
@@ -54,6 +62,16 @@ class MetricVector:
                                           # against accuracy (not raw call count).
     tokens_in: float = 0.0                # mean input tokens/query (diagnostic)
     tokens_out: float = 0.0               # mean output tokens/query (diagnostic)
+    ingest_usd: float = 0.0               # Phase-2 co-optimize: ONE-TIME USD to
+                                          # BUILD the graph (TS ingest LLM-extraction,
+                                          # read from ingest_cost.json). Amortized
+                                          # across the exam in total_usd_per_query so
+                                          # an expensive richer graph is only worth
+                                          # it if it lifts accuracy BROADLY.
+    ingest_tokens: float = 0.0            # one-time LLM tokens spent during ingest.
+    n_queries: int = 0                    # exam size used to amortize ingest_usd
+                                          # (0 -> treated as 1; per-query search cost
+                                          # is unaffected).
     per_query: dict = field(default_factory=dict)  # Phase A1: idx -> {mrr, hit@1, recall@100}
     primary_key: str = "recall@20"        # R5: which quality axis `primary` reads.
                                           # Default = the function campaign's
@@ -68,6 +86,16 @@ class MetricVector:
         to recall@20 (function campaign); MCQ rewards set primary_key to
         "mcq_accuracy" so dominance ranks on the MCQ axis (Risk R5)."""
         return self.quality.get(self.primary_key, 0.0)
+
+    @property
+    def total_usd_per_query(self) -> float:
+        """Amortized total-pipeline cost: per-query search USD plus the one-time
+        ingest USD spread over the exam. This is the Phase-2 cost axis -- selection
+        on (accuracy vs total_usd_per_query) means an LLM-extraction ingest edit is
+        accepted only if its accuracy gain, averaged over all queries, clears its
+        amortized build cost. Falls back to plain usd_cost when ingest is zero-LLM."""
+        n = max(1, int(self.n_queries))
+        return float(self.usd_cost) + (float(self.ingest_usd) / n)
 
     def get(self, metric: str) -> float:
         """Quality axes first; fall back to top-level cost attrs (usd_cost,
@@ -87,8 +115,11 @@ class MetricVector:
                    llm_calls=self.llm_calls, rerank_items=self.rerank_items,
                    recall_at_100=self.recall_at_100,
                    code_complexity=self.code_complexity,
+                   code_tokens=self.code_tokens,
                    usd_cost=self.usd_cost, tokens_in=self.tokens_in,
                    tokens_out=self.tokens_out,
+                   ingest_usd=self.ingest_usd, ingest_tokens=self.ingest_tokens,
+                   total_usd_per_query=self.total_usd_per_query,
                    crashed_frac=self.crashed_frac, crashed=float(self.crashed))
         return out
 
@@ -107,8 +138,9 @@ class MetricVector:
                 self.quality[k] = 0.0
                 bad = True
         for attr in ("latency_s", "db_load", "llm_calls", "rerank_items",
-                     "code_complexity", "crashed_frac", "recall_at_100",
-                     "usd_cost", "tokens_in", "tokens_out"):
+                     "code_complexity", "code_tokens", "crashed_frac",
+                     "recall_at_100", "usd_cost", "tokens_in", "tokens_out",
+                     "ingest_usd", "ingest_tokens", "n_queries"):
             if not _is_finite_number(getattr(self, attr)):
                 setattr(self, attr, 0.0)
                 bad = True
@@ -153,3 +185,30 @@ def code_complexity(src: str) -> float:
     branches = sum(1 for x in ast.walk(tree)
                    if isinstance(x, (ast.If, ast.For, ast.While, ast.comprehension)))
     return float(n + 3 * branches)
+
+
+# Token kinds that carry no program size: layout, comments, and the structural
+# markers tokenize emits around them. Everything else (NAME/OP/NUMBER/STRING/
+# keywords) is real source the program pays for.
+_NOISE_TOKENS = frozenset((
+    tokenize.ENCODING, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+    tokenize.DEDENT, tokenize.COMMENT, tokenize.ENDMARKER,
+))
+
+
+def code_tokens(src: str) -> float:
+    """Program SIZE as a count of meaningful Python source tokens (NAME, OP,
+    NUMBER, STRING, keywords) -- the "K" axis the value gate penalizes. Tokens,
+    not lines, so reformatting/whitespace can't game it and a literal doubling of
+    code is a 2x. Comments and layout tokens don't count (free to document).
+    Unparseable source returns a large sentinel so a broken candidate looks
+    maximally complex (it will crash anyway). -> float (>= 1.0 for any real src)."""
+    if not src:
+        return 1.0
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return 1e6
+    n = sum(1 for t in toks
+            if t.type not in _NOISE_TOKENS and (t.string or "").strip())
+    return float(max(1, n))

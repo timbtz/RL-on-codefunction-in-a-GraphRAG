@@ -3,8 +3,9 @@
 Precedence: dataclass defaults < configs/campaign.yaml < environment variables
 (FALKOR_HOST/FALKOR_PORT/GRAPH_NAME/MLFLOW_URL/MUTATOR_BACKEND/MUTATOR_MODEL)
 < explicit kwargs to load_config(). A `.env` file at the project root (KEY=VAL
-lines) is read into os.environ first; if it carries ANTHROPIC_API_KEY the
-mutator backend auto-switches to `sdk`.
+lines) is read into os.environ first; if it carries ZAI_API_KEY/Z.AI_KEY the
+mutator backend auto-switches to `zai` (GLM), or `sdk` for ANTHROPIC_API_KEY --
+but only when no backend is set anywhere (yaml/env/kwarg).
 """
 import hashlib
 import os
@@ -30,10 +31,19 @@ class Config:
     gate_size: int = 200
     gate_seed: int = 42
     gate_metric: str = "recall@20"          # axis used by 'strict' mode
-    gate_mode: str = "strict"               # strict | blend | dominance
-    gate_blend: str = "recall@20:0.6,mrr:0.4"  # weights for 'blend' mode
+    gate_mode: str = "strict"               # strict | blend | value | dominance
+    gate_blend: str = "recall@20:0.6,mrr:0.4"  # weights for 'blend'/'value' Q numerator
     gate_rotate_every: int = 0              # 0 = fixed gate; N = resample gate every N steps
     gate_max_complexity: float = 0.0        # 0 = off; else candidates above this AST-complexity are ineligible
+    gate_max_tokens: float = 0.0            # 0 = off; else candidates above this program-token size are ineligible (the enforced bloat wall)
+    # 'value' mode: V = Q / (usd_cost^cost_exp * code_tokens^complexity_exp).
+    # Exponents calibrated to break-even quality gains per resource doubling:
+    #   cost x2 -> +18.75% (2^0.248), complexity x2 -> +6.25% (2^0.0875).
+    # Cost penalized ~2.8x harder than complexity; both compound geometrically.
+    gate_cost_exp: float = 0.248            # alpha: $/query penalty exponent
+    gate_complexity_exp: float = 0.0875     # beta: code-token penalty exponent
+    gate_cost_floor: float = 5e-4           # floor C so cheap-side credit can't be gamed
+    gate_tokens_floor: float = 1.0          # floor K (every real program has >=1 token)
 
     # fast loop
     steps: int = 30
@@ -64,9 +74,25 @@ class Config:
     meta_holdout_size: int = 0     # B3: 0=off; else val queries fenced off from the gate
     meta_seed: int = 1234          # B3: seeds the meta-holdout partition
     meta_eval_every: int = 0       # B3: 0=off; else score best on the holdout every N accepts
+    # Cascaded promotion (run10c): a dedicated val slice -- disjoint from BOTH the
+    # gate pool AND the meta-holdout arbiter -- on which a gate-passing candidate is
+    # re-confirmed before the exported headline best moves. The cheap fixed gate
+    # makes a candidate eligible; this larger slice (noise guard) decides promotion.
+    promote_size: int = 0          # C: 0=off; else val queries fenced off as the promotion-confirm set
+    promote_seed: int = 5678       # seeds the promotion-slice partition (distinct from meta_seed)
+    promote_margin: float = 0.0    # min blend-composite gain on the promotion slice to move the exported best
+    # Generation restart (run10c): when a generation stalls (stop_after_stale steps
+    # with no promotion), instead of halting, restart from the Pareto set in COMBINE
+    # mode (the mutator synthesizes two Pareto members). 1 = no restart = old behaviour
+    # (stop on the first stall). The `steps` ceiling still bounds total work.
+    max_generations: int = 1
     select_holdout_n: int = 0      # Phase 1 final bake-off: 0=use full meta-holdout; else subsample to cap cost/latency
     select_cost_floor: float = 0.0 # 0.6b: cost-aware export band; 0=pure-quality argmax. Among finalists within
                                    # this much of the top holdout value, ship the cheapest by the rerank_items meter.
+    select_timeout_s: float = 60.0 # Phase 1 final bake-off per-query timeout. The meta-holdout is scored ONCE at the
+                                   # very end with a COLD llm cache, so the tight in-loop probe_timeout_s (gate queries
+                                   # warm over the run) starves cold Gemini-rerank calls -> every query crashes -> the
+                                   # run12 0.0 headline. Give the one-shot bake-off room; the loop probe stays tight.
 
     # hard caps / safety walls
     query_timeout_ms: int = 2000
@@ -103,8 +129,28 @@ class Config:
     # strategy arm
     strategy: str = "vector_only"
 
+    # --- STaRK (function) target: the editable FileSet service tree ----------
+    # The STaRK candidate is now a whole FileSet over `starksearch/src` (the
+    # editable service file overlaid on the immutable base), run in an isolated
+    # subprocess exactly like graph_search -- NOT a sandboxed `search(q, G)`
+    # string. Mirrors graphsearch_src / editable_files below.
+    stark_src: str = "starksearch/src"     # base checkout the FileSet overlays
+    stark_editable_files: tuple = (
+        "stark_search/stark_graph_search_service.py",
+    )                                       # relpaths the mutator may edit (tuple => hashable)
+    # --- archipelago cross-run seeding (DAG meta-orchestrator) ---------------
+    # seed_champion_path: overlay a saved champion's primary file onto the seed
+    # FileSet so a run continues a prior run's best (seed-chaining). merge +
+    # merge_seed_paths: warm-start the candidate pool with >=2 champions and force
+    # COMBINE mode from step 0 (the tournament-merge primitive). All empty/false
+    # => today's behaviour (seed from the on-disk base, no merge). Paths are file
+    # paths to a champion's primary editable file (e.g. runs/<name>/best_search.py).
+    seed_champion_path: str = ""
+    merge: bool = False
+    merge_seed_paths: tuple = ()            # tuple => hashable; yaml list coerced below
+
     # --- graph_search target (the real agentic search service) --------------
-    target: str = "function"               # function | graph_search
+    target: str = "function"               # function | graph_search | ingest_search
     graphsearch_src: str = "graphsearch/src"          # base checkout to overlay
     dataset_path: str = "graphsearch/data/dataset.json"  # gold MCQ set
     editable_files: tuple = (
@@ -140,6 +186,33 @@ class Config:
     # (keep seed composite > 0: weight < seed_accuracy / seed_usd_cost).
     search_cost_weight: float = 5.0
 
+    # --- ingest_search target (Phase-2 co-optimize ingestion + search) -------
+    # ONE candidate spans BOTH the TS graph-ingestion code AND the Python search
+    # code, evaluated by a two-phase rollout: `tsx ingest.ts -> Neo4j(graph_<hash>)
+    # -> python search.py -> judge-free MCQ exam`. The two editable files live in
+    # DIFFERENT packages, so their relpaths are anchored at the monorepo root
+    # (repo_root), not at graphsearch_src. The IngestSearchRewardAdapter owns the
+    # cross-tree materialization + the per-ingest-hash graph cache.
+    #
+    # Tight-scope discipline (README Phase-2 bloat warning): start with 2 editable
+    # files; widen only after the seam is stable. M2 = search.py only; M3 adds
+    # extract.ts.
+    ingest_editable_files: tuple = (
+        "graphmod/src/ingestion/extract.ts",
+        "graphsearch/src/search/search.py",
+    )                                       # relpaths from repo_root (tuple => hashable)
+    corpus_dir: str = "graphsearch/data/corpus"          # the tiny fixed corpus
+    graphmod_dir: str = "graphmod"                       # TS ingestion package root
+    ingest_cost_path: str = "graphmod/ingest_cost.json"  # TS writes, adapter reads
+    ingest_schema_path: str = "graphmod/schema.json"     # export-schema output
+    # per-candidate graph isolation: a fresh Neo4j database named graph_<hash> is
+    # (re)built only when the ingestion .ts overlay changes; search-only edits reuse
+    # the cached graph. Empty -> adapter derives graph_<ingest_hash>.
+    ingest_db_prefix: str = "graph_"
+    ingest_llm_extraction: bool = False     # M4 lever master switch (seed = OFF,
+                                            # zero-LLM ingest). The optimizer turns
+                                            # it on per-field inside extract.ts.
+
     @property
     def runs_dir(self):
         return os.path.join(self.root, "runs")
@@ -155,12 +228,35 @@ class Config:
         return path if os.path.isabs(path) else os.path.join(self.repo_root, path)
 
     @property
+    def stark_src_abs(self):
+        """The STaRK service base tree (`starksearch/src`) the FileSet overlays,
+        resolved against the monorepo root (sibling of graphretr-demo)."""
+        return self._resolve(self.stark_src)
+
+    @property
     def graphsearch_src_abs(self):
         return self._resolve(self.graphsearch_src)
 
     @property
     def dataset_path_abs(self):
         return self._resolve(self.dataset_path)
+
+    # --- ingest_search abs paths (resolved against the monorepo root) --------
+    @property
+    def corpus_dir_abs(self):
+        return self._resolve(self.corpus_dir)
+
+    @property
+    def graphmod_dir_abs(self):
+        return self._resolve(self.graphmod_dir)
+
+    @property
+    def ingest_cost_path_abs(self):
+        return self._resolve(self.ingest_cost_path)
+
+    @property
+    def ingest_schema_path_abs(self):
+        return self._resolve(self.ingest_schema_path)
 
     @property
     def opt_src_abs(self):
@@ -201,9 +297,31 @@ def _load_dotenv():
         os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
+def _autoswitch_backend(doc, overrides, env_backend):
+    """Pick a mutator backend from key presence, but ONLY when no backend was
+    specified anywhere -- yaml `mutator_backend`, the MUTATOR_BACKEND env var, or
+    a kwarg override. Returns "zai" | "sdk" | None (None => keep whatever the
+    caller/yaml set). z.ai wins over anthropic when both keys are present.
+
+    Precedence-correct: an explicit `mutator_backend: cli` in campaign.yaml is
+    NOT clobbered by a z.ai key sitting in .env (the old auto-switch could do
+    that, since it only checked the env var)."""
+    specified = ("mutator_backend" in (doc or {})
+                 or bool(env_backend)
+                 or "mutator_backend" in (overrides or {}))
+    if specified:
+        return None
+    if os.environ.get("ZAI_API_KEY") or os.environ.get("Z.AI_KEY"):
+        return "zai"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "sdk"
+    return None
+
+
 def load_config(**overrides) -> Config:
     _load_dotenv()
     kw = {}
+    doc = {}
     if os.path.exists(CAMPAIGN_YAML):
         doc = yaml.safe_load(open(CAMPAIGN_YAML)) or {}
         known = {f.name for f in fields(Config)}
@@ -233,12 +351,30 @@ def load_config(**overrides) -> Config:
                                if os.environ.get("SEARCH_COST_WEIGHT") else None),
         "fake_target": True if os.environ.get("GRAPHRETR_FAKE_TARGET") == "1" else None,
     }
-    if env["mutator_backend"] is None and os.environ.get("ANTHROPIC_API_KEY"):
-        env["mutator_backend"] = "sdk"
+    # Backend auto-switch by key presence -- but ONLY when no backend was
+    # specified anywhere (see _autoswitch_backend). An explicit `mutator_backend`
+    # is never clobbered by a key in .env.
+    auto = _autoswitch_backend(doc, overrides, env["mutator_backend"])
+    if auto:
+        env["mutator_backend"] = auto
     kw.update({k: v for k, v in env.items() if v is not None})
     kw.update(overrides)
     if isinstance(kw.get("editable_files"), list):  # yaml -> tuple (hashable)
         kw["editable_files"] = tuple(kw["editable_files"])
+    if isinstance(kw.get("stark_editable_files"), list):  # yaml -> tuple (hashable)
+        kw["stark_editable_files"] = tuple(kw["stark_editable_files"])
+    if isinstance(kw.get("merge_seed_paths"), list):  # yaml -> tuple (hashable)
+        kw["merge_seed_paths"] = tuple(kw["merge_seed_paths"])
+    if isinstance(kw.get("ingest_editable_files"), list):  # yaml -> tuple (hashable)
+        kw["ingest_editable_files"] = tuple(kw["ingest_editable_files"])
+    # The z.ai backend speaks GLM, not Claude: default any leftover claude-*
+    # model slug to glm-5.2 so MUTATOR_BACKEND=zai alone is sufficient and a
+    # stale claude slug can't 404. A non-claude slug the user set is respected.
+    if kw.get("mutator_backend") == "zai":
+        for _mf in ("mutator_model", "analyst_model",
+                    "editor_model", "architect_model"):
+            if str(kw.get(_mf, "")).startswith("claude"):
+                kw[_mf] = "glm-5.2"
     return Config(**kw)
 
 

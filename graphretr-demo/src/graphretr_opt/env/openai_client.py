@@ -13,13 +13,26 @@ import threading
 import time
 
 # $ per 1M tokens (input, output). Estimates for the ledger, not invoices.
+# OpenRouter prices verified 2026-06-21; reconfirm on openrouter.ai/models when
+# changing models (an unlisted model defaults to the pricey (1.0, 4.0) fallback
+# below, which would trip the budget ceiling early).
 PRICES = {
+    # legacy OpenAI (kept for old ledgers / fallback to direct OpenAI)
     "text-embedding-3-small": (0.02, 0.0),
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4.1-mini": (0.40, 1.60),
+    # OpenRouter -- retrieval LLM workhorse (Chinese OSS, reliable json_object)
+    "deepseek/deepseek-chat": (0.20, 0.80),       # DeepSeek V3
+    # OpenRouter -- embeddings. The SAME model the nodes were indexed with, just
+    # served through OpenRouter => NO re-index needed (1536-d, $0.02/M).
+    "openai/text-embedding-3-small": (0.02, 0.0),
 }
 
-EMBED_MODEL = "text-embedding-3-small"
+# Embeddings are a MATCHED PAIR: query vectors (here) and node vectors (in the
+# FalkorDB index) MUST use this exact model+dim. The graph is already indexed
+# with text-embedding-3-small (1536-d); routing that same model via OpenRouter
+# keeps the index valid -- no re-embed/re-index.
+EMBED_MODEL = "openai/text-embedding-3-small"
 EMBED_DIM = 1536
 # ~8191-token embedding input limit; chars/4 heuristic with margin.
 EMBED_MAX_CHARS = 30_000
@@ -31,6 +44,31 @@ EMBED_REQ_MAX_CHARS = 500_000
 
 class BudgetExceeded(RuntimeError):
     pass
+
+
+def _parse_json(content):
+    """Tolerant json_object parse -> dict ({} if hopeless). Some OpenRouter
+    providers wrap JSON in ```json ... ``` fences or add prose around it despite
+    response_format; strip the fence and fall back to the first {...} span before
+    giving up (a silent {} here would quietly degrade retrieval)."""
+    if not content:
+        return {}
+    s = content.strip()
+    if s.startswith("```"):
+        s = s.split("\n", 1)[-1] if "\n" in s else s.strip("`")
+        if s.endswith("```"):
+            s = s[: s.rfind("```")]
+        s = s.strip()
+    try:
+        return json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        i, j = s.find("{"), s.rfind("}")
+        if 0 <= i < j:
+            try:
+                return json.loads(s[i:j + 1])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return {}
 
 
 def step_cost_delta(prev, cur, accepted, ceiling_usd=0.0):
@@ -84,11 +122,36 @@ class OpenAIBudget:
 
     def _api(self):
         if self._client is None:
-            if not os.environ.get("OPENAI_API_KEY"):
-                raise RuntimeError("OPENAI_API_KEY not set (put it in .env)")
             from openai import OpenAI
-            self._client = OpenAI()
+            # OpenRouter is OpenAI-API-compatible: just point base_url at it and
+            # use the OpenRouter key. Falls back to direct OpenAI if no OpenRouter
+            # base/key is set, so this stays a no-op for the old setup.
+            base = os.environ.get("OPENROUTER_BASE_URL")
+            if base:
+                key = (os.environ.get("OPEN_ROUTER_API_KEY")
+                       or os.environ.get("OPENROUTER_API_KEY"))
+                if not key:
+                    raise RuntimeError(
+                        "OPENROUTER_BASE_URL set but no OPEN_ROUTER_API_KEY (.env)")
+                self._client = OpenAI(base_url=base, api_key=key)
+            else:
+                if not os.environ.get("OPENAI_API_KEY"):
+                    raise RuntimeError("OPENAI_API_KEY not set (put it in .env)")
+                self._client = OpenAI()
         return self._client
+
+    @staticmethod
+    def _provider_prefs():
+        """OpenRouter routing prefs for chat calls -- only applied when pointed at
+        OpenRouter. We PIN a known-good provider (DeepInfra) rather than sort=price:
+        the absolute-cheapest provider (StreamLake) returns json_object wrapped in
+        markdown fences, which broke parsing. Pinning also keeps scoring reproducible
+        across candidate programs. allow_fallbacks=True so a provider outage doesn't
+        kill the run (the parser strips fences if a fallback misbehaves)."""
+        if not os.environ.get("OPENROUTER_BASE_URL"):
+            return None
+        return {"order": ["deepinfra"], "allow_fallbacks": True,
+                "require_parameters": True}
 
     def _check(self):
         if self._usage["usd"] >= self._ceiling:
@@ -154,13 +217,14 @@ class OpenAIBudget:
     def chat_json(self, system, user, model="gpt-4o-mini", max_tokens=400):
         """One JSON-mode chat call -> parsed dict ({} on unparseable output)."""
         self._check()
-        resp = self._api().chat.completions.create(
+        kwargs = dict(
             model=model, max_tokens=max_tokens, temperature=0,
             response_format={"type": "json_object"},
             messages=[{"role": "system", "content": system},
                       {"role": "user", "content": user}])
+        prefs = self._provider_prefs()
+        if prefs is not None:
+            kwargs["extra_body"] = {"provider": prefs}
+        resp = self._api().chat.completions.create(**kwargs)
         self._record(model, resp.usage.prompt_tokens, resp.usage.completion_tokens)
-        try:
-            return json.loads(resp.choices[0].message.content)
-        except (json.JSONDecodeError, TypeError):
-            return {}
+        return _parse_json(resp.choices[0].message.content)

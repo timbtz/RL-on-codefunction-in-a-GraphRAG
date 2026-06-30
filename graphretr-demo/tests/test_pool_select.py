@@ -124,12 +124,43 @@ def test_cap_eviction_keeps_frontier():
     _check("evict: dominated specialist C evicted", pc.sha not in pool.shas())
 
 
+def test_select_mate():
+    # Three members, each sole-best on a distinct query. The mate is always a
+    # DISTINCT member from the chosen parent (run10c combine mode).
+    pool = CandidatePool(cap=8)
+    pa, pb, pc = _prog("a"), _prog("b"), _prog("c")
+    pool.consider(pa, _mv(0.50, per_query={1: {"mrr": 0.9}, 2: {"mrr": 0.0}, 3: {"mrr": 0.0}}))
+    pool.consider(pb, _mv(0.50, per_query={1: {"mrr": 0.0}, 2: {"mrr": 0.9}, 3: {"mrr": 0.0}}))
+    pool.consider(pc, _mv(0.50, per_query={1: {"mrr": 0.0}, 2: {"mrr": 0.0}, 3: {"mrr": 0.9}}))
+    rng = random.Random(0)
+    for _ in range(20):
+        mate = pool.select_mate(rng, exclude_sha=pa.sha)
+        _check("mate: never the excluded parent", mate.sha != pa.sha)
+        _check("mate: is a real pool member", mate.sha in pool.shas())
+    # A single-member pool has no mate.
+    solo = CandidatePool(cap=8)
+    solo.consider(pa, _mv(0.5, per_query={1: {"mrr": 0.9}}))
+    _check("mate: None when no other member",
+           solo.select_mate(random.Random(0), exclude_sha=pa.sha) is None)
+    # Fallback to a distinct member when nobody else wins a query. pb must still
+    # be ADMITTED, so make it cheaper (frontier on the cost axis) while winning no
+    # query outright.
+    nowin = CandidatePool(cap=8)
+    nowin.consider(pa, _mv(0.50, complexity=10, per_query={1: {"mrr": 0.9}}))  # sole-best q1
+    nowin.consider(pb, _mv(0.30, complexity=2, per_query={1: {"mrr": 0.0}}))   # frontier (cheap), wins nothing
+    _check("mate: precondition -- pb is admitted", pb.sha in nowin.shas())
+    mate = nowin.select_mate(random.Random(0), exclude_sha=pa.sha)
+    _check("mate: falls back to a distinct member when no other winner",
+           mate is not None and mate.sha == pb.sha)
+
+
 def main():
     test_sole_best_counts()
     test_admission_rules()
     test_select_prunes_dominated_winners()
     test_select_proportional_and_deterministic()
     test_cap_eviction_keeps_frontier()
+    test_select_mate()
     print("\nall pool_select tests passed")
 
 

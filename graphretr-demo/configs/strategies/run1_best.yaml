@@ -1,6 +1,6 @@
 # Strategy family "run1_best" -- warm-start continuation of campaign run1.
 family: vector_only
-seed: src/graphretr_opt/artifact/seeds/run1_best.py
+seed: ../starksearch/seeds/run1_best.py
 notes: >
   Verbatim copy of runs/run1/best_search.py (gate recall@20 0.3662, accepted
   at step 14 before a claude-CLI rate-limit outage burned steps 16-29).

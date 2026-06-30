@@ -8,34 +8,53 @@ graph_name: prime
 mlflow_url: http://127.0.0.1:5000
 experiment: graphretr-opt
 
-# data / gate
-# Phase 0.2 (de-noise the gate; run7 post-mortem #6 Option A). The rotating
-# 200-of-1941 gate had per-epoch SE ~ 0.035 -- LARGER than real per-edit deltas
-# (0.01-0.03), so the whole accept/reject/stop trajectory was noise-driven and
-# the run-7 lift was within 1 SE of zero. Freeze + enlarge to the full pool:
-# SE -> ~0.011, and the `best=rb` re-score on rotation becomes dead code. Safe
-# because the gate stays disjoint from the fenced meta-holdout (the export
-# arbiter, Phase 0.1) and, in Stage-2, ingestion is answer-blind by construction.
-gate_size: 1941             # full gate pool (val 2241 - meta_holdout 300); was a 200-subsample
+# data / gate  -- run10c CASCADED EVAL (A/B/C). KernelEvolve-style staged scoring,
+# adapted for our NOISY sampled Q&A fitness (deterministic-fitness systems get a
+# trustworthy per-candidate score for free; we engineer it with a cascade):
+#   A explore  (rollout_batch, train)      -- FIXED failure-mining set the mutator works on.
+#   B gate     (gate_size,    gate_pool)   -- FIXED cheap accept-into-pool signal; scores
+#                                             comparable across all nodes (no rotation).
+#   C promote  (promote_size, val slice)   -- larger DISJOINT confirm set; the exported best
+#                                             only moves if a B-passing candidate clears the
+#                                             incumbent here by promote_margin (noise guard).
+#   final      (meta_holdout 300)          -- one-time export bake-off arbiter (disjoint from B+C).
+# A,B,C,arbiter are all mutually disjoint (A=train; B,C,arbiter carved from val).
+gate_size: 30               # B: FIXED cheap per-step accept gate (was rotating 24)
 gate_seed: 42               # seeds gate sampling AND per-step rollout rng
 gate_metric: recall@20      # axis used by 'strict' mode
-gate_mode: blend            # strict | blend | dominance  (blend = anti-overfit)
-gate_blend: "recall@20:0.4,mrr:0.3,hit@1:0.3"  # Hit@1 push: weight onto ranking axes
-gate_rotate_every: 0        # 0 = FROZEN gate (de-noised). The meta-holdout, not rotation,
-                            # is now the anti-memorisation defense (export arbiter + overfit detector).
+gate_mode: value            # strict | blend | value | dominance
+                            # value = efficiency-adjusted: V = Q / (usd_cost^a * code_tokens^b).
+                            # Q is the blend below; crash -> V=0; bloat capped (gate_max_tokens).
+gate_blend: "recall@20:0.4,mrr:0.3,hit@1:0.3"  # the Q numerator (Hit@1 push onto ranking axes)
+# value-gate trade-off (post-mortem #3/#5): exponents calibrated so a resource
+# doubling must be EARNED in quality -- cost x2 -> +18.75%, complexity x2 -> +6.25%
+# (compounding geometrically). Cost penalized ~2.8x harder than code size.
+gate_cost_exp: 0.248        # alpha: $/query penalty exponent
+gate_complexity_exp: 0.0875 # beta: code-token penalty exponent
+gate_cost_floor: 0.0005     # floor C so a degenerate ultra-cheap program can't game the cost term
+gate_max_tokens: 0          # 0 = auto (campaign sets it to ~1.3x the seed's token size); the
+                            # ENFORCED bloat wall (pool + gate), replacing run10c's advisory cap
+gate_rotate_every: 0        # FIXED gate (was 1): one frozen gate_idxs.json for the whole run, so
+                            # B-scores are comparable step-to-step. C (promote) is the anti-overfit
+                            # defense now, not rotation. NOTE: delete a stale gate_idxs.json (old
+                            # size) when reusing a runs_dir -- it is read back verbatim if present.
 gate_max_complexity: 900    # cap RE-ENABLED (post-mortem #6 Option A): vetoes sprawling memorised
                             # programs (run1_best cc=2456) while clearing every legit strategy
                             # (reasoning_first_v6 cc=345, ~2.6x headroom). Still a Pareto axis too.
 
 # fast loop (SkillOpt-derived)
 steps: 40                # backstop ceiling; stop_after_stale ends the run earlier on a real plateau
-rollout_batch: 24       # train queries per rollout
+rollout_batch: 50       # A: FIXED explore/failure-mining set (was 8); bigger pool of failures to work on
 reflect_top: 8          # worst rows shown to the LLM (split ~50/50 missed vs misranked)
 buffer_last: 8          # rejected-edit summaries fed back into the prompt
 edit_schedule: cosine   # const | cosine | linear  (the "learning rate"): big edits early, fine late
 max_edits: 6            # L_max: edit-block budget per mutation
 min_edits: 2            # L_min: floor for decaying schedules
-stop_after_stale: 8     # stop after 8 STALE steps (no new Pareto-front member; plateau-termination)
+stop_after_stale: 8     # run10c: end the GENERATION after 8 steps with no PROMOTION (no candidate
+                        # confirmed better on C); keep the best/Pareto set. (was 40 = effectively off)
+max_generations: 4      # run10c: on a stall, restart from the Pareto set in COMBINE mode (mutator
+                        # synthesizes two members) instead of halting; stop after this many generations.
+                        # 1 = old behaviour (first stall ends the run). `steps` still caps total work.
 repair_budget: 1        # compiler-in-the-loop self-repair: feed the sandbox/probe error back into the
                         # SAME mutator conversation for 1 targeted fix before rejecting (run-7 burned 483K
                         # tokens / 3 of 15 Opus calls on probe-failing candidates for zero in-step signal)
@@ -44,15 +63,19 @@ repair_budget: 1        # compiler-in-the-loop self-repair: feed the sandbox/pro
 pool_enabled: true      # A: instance-wise Pareto pool replaces the single incumbent
 pool_cap: 24            # A2: max pool members (frontier + top-K)
 pool_discount: true     # D3: weight parent pick by 1/(1+children) so under-explored members stay sampled
-minibatch_size: 20      # B2: cheap pre-screen size before paying the full 1941-query gate
-                        # (MORE valuable now the full gate is ~10x costlier than the old 200-subsample).
+minibatch_size: 0       # run10c: gate already tiny (24), skip the pre-screen --
+                        # kills clearly-worse candidates on 20 queries (~10x cheaper rejects).
 minibatch_eps: 0.0      # 0.5 (post-mortem #4): 0 => default 1/minibatch_size (~0.05). The pre-screen now
                         # references the INCUMBENT best (not a sampled parent) and promotes on
                         # value(child) >= value(best) - eps, not strict `>` -- the b=20 SE ~ 0.11 made
                         # strict-greater false-kill 63% of candidates (19/30) in run-7.
 meta_holdout_size: 300  # B3: val queries fenced off from the gate (overfit detector + Phase 0.1 export arbiter)
 meta_seed: 1234         # B3: seeds the meta-holdout partition
-meta_eval_every: 3      # B3: score best on the holdout every 3 accepts; log gate - meta
+meta_eval_every: 99     # run10c: skip mid-run holdout evals; the final bake-off is the only big eval
+promote_size: 100       # C: dedicated promotion-confirm slice, disjoint from gate_pool AND meta-holdout
+promote_seed: 5678      # seeds the promotion-slice partition (distinct from meta_seed)
+promote_margin: 0.01    # min blend-composite gain on C to move the exported best (~1 SE at n=100;
+                        # strict-greater would promote on sampling noise)
 select_cost_floor: 0.0  # 0.6b: 0 => pure-quality export argmax (run-7 parity, keeps re-export reproducible).
                         # >0 => among finalists within this much of the top holdout value, ship the cheapest
                         # by the deterministic rerank_items meter. Accept gate stays pure-quality regardless.
@@ -66,25 +89,56 @@ crash_frac_limit: 0.10
 
 # mutator
 mutator_agent: single   # single | tiered (Haiku analyst -> Sonnet editor -> Opus architect)
-mutator_backend: cli    # cli (claude -p) | sdk (anthropic client; needs API key)
+mutator_backend: zai    # cli (claude -p) | sdk (anthropic client) | zai (GLM via z.ai API)
+# z.ai (GLM-5.2) direct API -- supersedes the `claude -p` CLI path. The agent
+# (agents/single.py SingleCoder._zai) points the openai SDK at z.ai's CODING
+# endpoint (https://api.z.ai/api/coding/paas/v4/) -- the one a "Personal Coding
+# Plan" key is authorized on; the general /api/paas/v4 endpoint 429/1113s such a
+# key. Direct HTTPS, lower latency than spawning the CLI per call, and GLM's
+# default thinking mode is DISABLED for speed (it otherwise adds ~5-15s/call and
+# can exhaust max_tokens with empty output). Key in .env as Z.AI_KEY (or
+# ZAI_API_KEY); ZAI_BASE_URL overrides the endpoint (set it to the general one for
+# a pay-as-you-go key). config.py auto-selects `zai` when that key is present AND
+# no backend is set anywhere -- this explicit line pins the run's config_hash to
+# GLM-5.2 (an honest experiment id). config.py defaults any leftover claude-* slug
+# to glm-5.2 when backend=zai, so MUTATOR_BACKEND=zai alone is enough.
+mutator_model: glm-5.2            # SingleCoder model (tiered arm uses the three below instead)
 # explicit ids, NOT bare aliases: the CLI alias "opus" resolves to its newest (4.8);
 # we deliberately pin 4.7 (same $5/$25 price, 1M ctx). Haiku=high-Q, newest Sonnet.
-mutator_model: claude-opus-4-7      # SingleCoder model (tiered arm uses the three below instead)
+# (Inert under mutator_agent: single + backend zai; config.py would default these
+# to glm-5.2 too if the tiered arm were turned on with backend zai.)
 analyst_model: claude-haiku-4-5     # tiered: cheap evidence digest (Haiku 4.5)
 editor_model: claude-sonnet-4-6     # tiered: routine edits (newest Sonnet)
 architect_model: claude-opus-4-7    # tiered: plateau escalation (Opus 4.7, not 4.8)
 architect_plateau: 3    # consecutive non-accepts before escalating editor -> architect
 llm_timeout_s: 900
 
-# openai (embedder + G.extract/llm_rerank/reformulate); key in .env, ledger at runs/openai_usage.json
+# OpenRouter (retrieval LLM calls + embeddings). Set in .env:
+#   OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+#   OPEN_ROUTER_API_KEY=sk-or-v1-...
+# The OpenAIBudget gateway auto-routes to OpenRouter when OPENROUTER_BASE_URL is
+# set (else falls back to direct OpenAI). Ledger at runs/openai_usage.json.
+#
+# embedder=openai_small routes embeddings through the budget gateway, which uses
+# EMBED_MODEL=openai/text-embedding-3-small (1536-d) served VIA OpenRouter -- the
+# same model the nodes were indexed with, so NO re-index is needed. All five
+# retrieval calls use Gemini 2.5 Flash Lite (cheap, fast, reliable json_object).
+# Pinned (not openrouter/auto) so fitness stays reproducible across candidates.
 embedder: openai_small
-extract_model: gpt-4o-mini      # model behind the fixed-prompt G.extract
-rerank_model: gpt-4o-mini       # model behind G.llm_rerank
-reformulate_model: gpt-4o-mini  # model behind G.reformulate (Phase C1)
-openai_budget_usd: 15.0         # hard $ ceiling shared by embedder + extract/rerank/reformulate (raised 10->15 for run-7, 2026-06-19)
+extract_model: google/gemini-2.5-flash-lite      # G.extract (cached per query)
+rerank_model: google/gemini-2.5-flash-lite       # G.llm_rerank (drives recall; highest volume)
+reformulate_model: google/gemini-2.5-flash-lite  # G.reformulate (Phase C1)
+judge_model: google/gemini-2.5-flash-lite        # G.judge_sufficient
+frontier_model: google/gemini-2.5-flash-lite     # G.pick_frontier
+# Light calls (extract/reformulate/frontier) can drop to a faster/cheaper Chinese
+# model -- copy the exact current slug from openrouter.ai/models, e.g.
+# z-ai/glm-4.5-air or a small qwen3 -- once verified (kept on deepseek to avoid 404).
+openai_budget_usd: 15.0         # raised 10->15 (run13): ledger cumulative at ~$5.66, so the GLM run + now-cold 300-query bake-off (select_timeout_s=60) won't die mid-run on the cap
 
 # strategy arm (layer 3): which seed family this campaign descends. run-6 arm:
 # reasoning_first_v6 (run-5 rerank + G.reformulate). For the run6a loop-only
 # checkpoint, override: --strategy reasoning_first  (and set pool_enabled true,
 # minibatch_size/meta_holdout_size 0 to isolate the pool).
-strategy: reasoning_first_v6
+strategy: reasoning_first_v7   # END-TO-END-EDITABLE arm (floor: G.query/embed/llm;
+                               # operators are editable seed helpers). v6 (frozen
+                               # operators) still available via --strategy reasoning_first_v6.

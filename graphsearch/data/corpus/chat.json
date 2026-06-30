@@ -1,0 +1,37 @@
+[
+  { "seq": 1, "channel": "eng", "author": "tim", "ts": "2026-05-01T09:00:00Z",
+    "text": "I pushed the [[auth-redesign]] spec, please review. Tracked in PROJ-12." },
+
+  { "seq": 2, "channel": "eng", "author": "lasse", "ts": "2026-05-01T10:15:00Z", "reply_to": 1,
+    "text": "@tim the auth-redesign looks good - approving it." },
+
+  { "seq": 3, "channel": "eng", "author": "mara", "ts": "2026-05-02T11:00:00Z",
+    "text": "Billing migration is blocked on PROJ-42 until the usage events land." },
+
+  { "seq": 4, "channel": "eng", "author": "noah", "ts": "2026-05-02T11:30:00Z",
+    "text": "New hires should read [[billing-overview]] first." },
+
+  { "seq": 5, "channel": "eng", "author": "tim", "ts": "2026-05-03T09:45:00Z",
+    "text": "Token cache eviction is the risky bit of the auth-redesign." },
+
+  { "seq": 6, "channel": "eng", "author": "lasse", "ts": "2026-05-05T14:00:00Z",
+    "text": "Search index rebuild PROJ-7 depends on the new auth tokens." },
+
+  { "seq": 7, "channel": "eng", "author": "mara", "ts": "2026-05-15T08:30:00Z",
+    "text": "@noah nice work on the incident hotfix yesterday." },
+
+  { "seq": 8, "channel": "eng", "author": "noah", "ts": "2026-05-15T08:45:00Z", "reply_to": 7,
+    "text": "thanks - the eviction policy fix is in, PROJ-19 tracks the hardening." },
+
+  { "seq": 9, "channel": "eng", "author": "tim", "ts": "2026-05-16T10:00:00Z",
+    "text": "I'll own the long-term token cache eviction fix." },
+
+  { "seq": 10, "channel": "eng", "author": "lasse", "ts": "2026-05-18T13:00:00Z",
+    "text": "Can someone review the [[search-index-design]]?" },
+
+  { "seq": 11, "channel": "eng", "author": "mara", "ts": "2026-05-19T09:20:00Z", "reply_to": 10,
+    "text": "@lasse I reviewed the search-index-design, looks solid." },
+
+  { "seq": 12, "channel": "eng", "author": "noah", "ts": "2026-05-20T16:00:00Z",
+    "text": "Onboarding doc updated, see [[onboarding]]." }
+]

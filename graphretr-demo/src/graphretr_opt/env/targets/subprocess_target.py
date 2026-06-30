@@ -32,7 +32,7 @@ _WORKER_MODULE = "graphretr_opt.env.targets._worker"
 class SubprocessSearchTarget:
     def __init__(self, neo4j_cfg, llm_cfg, opt_src_dir, service_relpath=None,
                  service_kwargs=None, python_exe=None, tmp_root=None,
-                 query_concurrency=1):
+                 query_concurrency=1, worker_module=None):
         """neo4j_cfg / llm_cfg: passed through to the worker's build_service.
         opt_src_dir: the graphretr-demo `src` dir, put on the worker's PYTHONPATH
             so `python -m graphretr_opt...._worker` resolves.
@@ -41,6 +41,9 @@ class SubprocessSearchTarget:
         tmp_root: parent dir for throwaway overlays (default: system temp).
         query_concurrency: how many of this batch's queries the worker runs in
             parallel (each on its own service+sink). 1 = sequential.
+        worker_module: the `-m` module the subprocess runs. Defaults to the
+            graphsearch worker; the STaRK boot points it at `_worker_stark` so the
+            SAME spawn/overlay/wall-clock-kill machinery drives both services.
         """
         self._neo4j = neo4j_cfg
         self._llm = llm_cfg
@@ -50,6 +53,7 @@ class SubprocessSearchTarget:
         self._python = python_exe or sys.executable
         self._tmp_root = tmp_root
         self._query_concurrency = max(1, int(query_concurrency or 1))
+        self._worker_module = worker_module or _WORKER_MODULE
 
     def run(self, file_set, queries, timeout_s: float) -> dict:
         queries = list(queries)
@@ -78,7 +82,7 @@ class SubprocessSearchTarget:
             [self._opt_src, env.get("PYTHONPATH", "")]).strip(os.pathsep)
         t0 = time.time()
         proc = subprocess.Popen(
-            [self._python, "-m", _WORKER_MODULE],
+            [self._python, "-m", self._worker_module],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env, text=True, start_new_session=True)
         try:

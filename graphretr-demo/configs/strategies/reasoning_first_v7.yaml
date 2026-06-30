@@ -1,0 +1,17 @@
+# Strategy family "reasoning_first_v7" -- the END-TO-END-EDITABLE arm.
+# Same pipeline shape as v6 (extract -> retrieve -> rerank -> conditional
+# reformulate, plus a graph-recall pass) but every operator is now an editable
+# helper in the seed, built on the raw floor (G.query / G.embed / G.llm). The
+# optimizer owns the Cypher, the prompts, the fusion math and can add/replace
+# operators -- so the recall ceiling (gold not surfaced) is finally in scope.
+family: reasoning_first_v7
+seed: ../starksearch/seeds/reasoning_first_v7.py
+notes: >
+  Editable operators on three trusted primitives: G.query (read-only Cypher),
+  G.embed (query embedding), G.llm (metered+cached JSON call). The seed ships
+  vector_search / text_search / extract / llm_rerank / reformulate / graph_recall
+  as ordinary helpers copied from the v6 behavior, so day-1 quality matches v6
+  while the optimizer can now rewrite retrieval itself -- e.g. graph-structural
+  recall (BFS / shortest_path between query entities) for gold that vector search
+  never surfaces. Pairs with the run-6 optimizer (instance-Pareto pool, reflective
+  attribution, minibatch pre-screen, meta-holdout, tiered proposer).

@@ -1,0 +1,12 @@
+[project]
+name = "starksearch"
+version = "0.1.0"
+description = "STaRK-prime graph search service evolved by graphretr_opt (FalkorDB-backed `search(q, G)` over the STaRK biomedical KG)."
+requires-python = ">=3.11"
+
+# Lightweight in-repo package (like graphsearch): resolved via repo-root on
+# sys.path, not installed. This file documents deps + the package for symmetry
+# and any future `pip install -e .`.
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["starksearch*"]

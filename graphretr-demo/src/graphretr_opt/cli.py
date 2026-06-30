@@ -31,6 +31,18 @@ def main(argv=None):
                     help="resume from runs/<campaign>/checkpoint.json if present")
     po.add_argument("--checkpoint-every", type=int, default=None,
                     help="atomically snapshot the live pool every N steps (0=off)")
+    po.add_argument("--seed-from-run", default=None,
+                    help="seed this run from runs/<NAME>/best_search.py (a prior "
+                         "run's champion) -- archipelago seed-chaining")
+    po.add_argument("--seed-champion", default=None,
+                    help="seed from an explicit champion file path (overrides "
+                         "--seed-from-run)")
+    po.add_argument("--merge", action="store_true",
+                    help="warm-start the pool with the --merge-seed champions and "
+                         "force COMBINE mode from step 0 (archipelago merge)")
+    po.add_argument("--merge-seed", nargs="+", default=None,
+                    help="champion paths OR bare run names (resolved to "
+                         "runs/<NAME>/best_search.py) to warm-start for --merge")
 
     ps = sub.add_parser("optimize-search",
                         help="evolve the REAL agentic search service (graph_search "
@@ -43,6 +55,20 @@ def main(argv=None):
                     help="atomically snapshot the live pool every N steps (0=off)")
     ps.add_argument("--fake-target", action="store_true",
                     help="use FakeSearchTarget (offline: no Neo4j / API keys)")
+
+    pis = sub.add_parser("optimize-ingest-search",
+                         help="Phase-2 co-optimize: evolve graph INGESTION (TS) + "
+                              "SEARCH (py) together; two-phase tsx ingest -> Neo4j "
+                              "-> search -> MCQ exam, metered on total ingest+search USD")
+    pis.add_argument("--steps", type=int, default=None)
+    pis.add_argument("--campaign-name", default="ingest_search")
+    pis.add_argument("--resume", action="store_true",
+                     help="resume from runs/<campaign>/checkpoint.json if present")
+    pis.add_argument("--checkpoint-every", type=int, default=None,
+                     help="atomically snapshot the live pool every N steps (0=off)")
+    pis.add_argument("--llm-extraction", action="store_true",
+                     help="enable the metered LLM-extraction lever in ingest (M4); "
+                          "default OFF = zero-LLM rule-based ingest seed")
 
     pf = sub.add_parser("final", help="score seed+best on the locked test split once")
     pf.add_argument("--campaign-name", required=True)
@@ -68,7 +94,24 @@ def main(argv=None):
     pv.add_argument("--out", default=None, help="static output path (default: "
                     "runs/<campaign>/lineage.html)")
 
+    parc = sub.add_parser("archipelago",
+                          help="DAG meta-orchestrator: chain + tournament-merge "
+                               "many optimize runs from a YAML spec")
+    parc.add_argument("--spec", required=True, help="path to the archipelago YAML spec")
+    parc.add_argument("--dry-run", action="store_true",
+                      help="plan the branches + merge bracket and write the DAG; "
+                           "launch no optimizer runs")
+    parc.add_argument("--resume", action="store_true",
+                      help="reuse the ledger + skip runs that already have "
+                           "select_holdout.json")
+
     args = ap.parse_args(argv)
+    if args.cmd == "archipelago":
+        # orchestrator only: it shells out to `optimize` subprocesses, so it needs
+        # no FalkorDB / embedder / Campaign.boot() of its own.
+        from .archipelago import run_campaign
+        run_campaign(args.spec, dry_run=args.dry_run, resume=args.resume)
+        return
     if args.cmd == "viz":
         # read-only; no Campaign.boot() (no FalkorDB / embedder needed)
         from .config import load_config as _lc
@@ -86,15 +129,53 @@ def main(argv=None):
     if getattr(args, "checkpoint_every", None) is not None:
         overrides["checkpoint_every"] = args.checkpoint_every
 
+    # Archipelago seed/merge resolution (optimize subcommand only): a bare run
+    # name resolves to runs/<NAME>/best_search.py; an explicit path is used as-is.
+    if (getattr(args, "seed_from_run", None) or getattr(args, "seed_champion", None)
+            or getattr(args, "merge", False)):
+        runs_dir = load_config().runs_dir
+
+        def _champ(name_or_path):
+            if os.sep in name_or_path or name_or_path.endswith(".py"):
+                p = name_or_path
+            else:
+                p = os.path.join(runs_dir, name_or_path, "best_search.py")
+            if not os.path.exists(p):
+                raise SystemExit(f"champion not found: {p}")
+            return p
+
+        if getattr(args, "seed_champion", None):
+            overrides["seed_champion_path"] = _champ(args.seed_champion)
+        elif getattr(args, "seed_from_run", None):
+            overrides["seed_champion_path"] = _champ(args.seed_from_run)
+        if getattr(args, "merge", False):
+            seeds = getattr(args, "merge_seed", None) or []
+            overrides["merge"] = True
+            overrides["merge_seed_paths"] = tuple(_champ(s) for s in seeds)
+
     if args.cmd == "optimize-search":
-        # graph_search path: boot_search() (no FalkorDB / stark_qa / torch).
+        # graph_search path: cfg.target drives boot() -> boot_search() (no
+        # FalkorDB / stark_qa / torch on this path).
         overrides["target"] = "graph_search"
         if getattr(args, "fake_target", False):
             overrides["fake_target"] = True
-        camp = Campaign(load_config(**overrides)).boot_search()
+        camp = Campaign(load_config(**overrides)).boot()
         camp.optimize_search(steps=args.steps, campaign=args.campaign_name)
         return
 
+    if args.cmd == "optimize-ingest-search":
+        # Phase-2 co-optimize path: cfg.target drives boot() -> boot_ingest_search()
+        # (TS ingest + py search, two-phase reward, total-USD Pareto). Reuses the
+        # graph_search loop runner (optimize_search) since boot_ingest_search sets
+        # the same search_* attrs.
+        overrides["target"] = "ingest_search"
+        if getattr(args, "llm_extraction", False):
+            overrides["ingest_llm_extraction"] = True
+        camp = Campaign(load_config(**overrides)).boot()
+        camp.optimize_search(steps=args.steps, campaign=args.campaign_name)
+        return
+
+    # function (STaRK) path: cfg.target defaults to "function" -> _boot_function().
     campaign = Campaign(load_config(**overrides)).boot()
 
     if args.cmd == "stage0":

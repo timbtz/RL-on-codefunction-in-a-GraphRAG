@@ -1,20 +1,12 @@
-"""env -- the IMMUTABLE half: graph backend + closed primitive DSL + sandbox.
+"""env -- the engine's target-agnostic eval seam + shared gateways.
 
-Nothing in this package is ever mutated by the optimizer loop. It is the
-SkillOpt "harness h": swapping the graph engine (backends/), the cache policy
-(cache.py) or the isolation mechanism (sandbox.py) must never require touching
-the optimizer/ half.
-
-`Sandbox`/`SandboxError` are stdlib-only and exported eagerly. `RetrievalGraph`
-(numpy + embedder + primitives) is exposed LAZILY so the graph_search path -- whose
-eval seam is env.search_target / env.targets, NOT RetrievalGraph -- can import the
-package without that chain.
+Nothing here is mutated by the optimizer loop. After the STaRK carve-out
+(2026-06-25) the STaRK `G` service (retrieval_graph, primitives, cache,
+embedder, backends) lives in the sibling `starksearch/` package, and BOTH
+targets now score candidates in a worker subprocess -- so the in-process AST
+`Sandbox` is gone. What remains is the generic seam: the `SearchTarget` port
+(`search_target`, `targets/`: the graphsearch + STaRK workers), the shared
+LLM/budget gateway (`openai_client`), the no-op `null_sandbox`, and the stable
+`SandboxError` (`errors`) the optimizer core still catches.
 """
-from .sandbox import Sandbox, SandboxError   # noqa: F401
-
-
-def __getattr__(name):  # PEP 562 lazy attribute
-    if name == "RetrievalGraph":
-        from .retrieval_graph import RetrievalGraph
-        return RetrievalGraph
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+from .errors import SandboxError   # noqa: F401

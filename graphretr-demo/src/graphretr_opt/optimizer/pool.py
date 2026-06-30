@@ -63,8 +63,13 @@ def _sole_best_counts(members):
 
 
 class CandidatePool:
-    def __init__(self, cap=24):
+    def __init__(self, cap=24, max_tokens=0.0):
         self.cap = int(cap)
+        # Hard bloat wall (run10c fix): a program whose source-token size exceeds
+        # max_tokens is never admitted to the pool -- so it can never become a
+        # parent and propagate the bloat. 0 = off. Mirrors the gate's token wall;
+        # the gate guards the headline best, this guards the breeding population.
+        self.max_tokens = float(max_tokens or 0.0)
         self.members = []
 
     def __len__(self):
@@ -89,6 +94,12 @@ class CandidatePool:
         # frontier and (worse) reset the stale counter via frontier_grew. A broken
         # program is never a frontier member.
         if getattr(metrics, "crashed", False):
+            return False, False
+        # Hard bloat wall: over-cap programs never enter the breeding pool (so they
+        # can't become parents) -- the run10c bloat-spiral fix. Enforced here, not
+        # advisory: pool.consider previously ignored size entirely.
+        if (self.max_tokens
+                and getattr(metrics, "code_tokens", 0.0) > self.max_tokens):
             return False, False
         if program.sha in self.shas():
             return False, False
@@ -157,6 +168,31 @@ class CandidatePool:
                     chosen = m
                     break
         chosen.children += 1
+        return chosen
+
+    def select_mate(self, rng, exclude_sha):
+        """Pick a SECOND, distinct member to COMBINE with the chosen parent
+        (run10c combine mode -- KernelEvolve sibling-insight, NOT GA crossover).
+        Prefer a complementary specialist: sample among the other members in
+        proportion to the queries they win outright (so the mate brings skills the
+        parent may lack); fall back to the highest-primary distinct member. Returns
+        None when the pool has no other member. Does NOT bump `children` -- the
+        mate is a reference, not the lineage parent."""
+        others = [m for m in self.members if m.sha != exclude_sha]
+        if not others:
+            return None
+        by_sha = {m.sha: c for m, c in zip(self.members, _sole_best_counts(self.members))}
+        winners = [(m, by_sha.get(m.sha, 0)) for m in others if by_sha.get(m.sha, 0) >= 1]
+        if not winners:
+            return max(others, key=lambda m: m.metrics.primary)
+        total = sum(c for _, c in winners)
+        r = rng.random() * total
+        acc, chosen = 0.0, winners[-1][0]
+        for m, c in winners:
+            acc += c
+            if r <= acc:
+                chosen = m
+                break
         return chosen
 
     def best(self, key=None):

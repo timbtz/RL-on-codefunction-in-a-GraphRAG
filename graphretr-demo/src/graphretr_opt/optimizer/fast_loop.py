@@ -3,9 +3,9 @@ and the whole of the Stage-1 demo: rollout -> reflect -> mutate -> gate ->
 accept/reject, with a fixed-subsample gate, an sha-keyed score cache, and a
 rejected buffer feeding the next prompt.
 
-It never touches the test split. All cross-strategy machinery (SlowLoop,
-scheduler) is out of scope here -- FastLoop takes a seed and a budget and
-returns an ArmResult.
+It never touches the test split. The deferred cross-strategy (slow-loop) layer
+is out of scope here -- FastLoop takes a seed and a budget and returns an
+ArmResult.
 """
 import json
 import os
@@ -18,8 +18,8 @@ from ..agents.single import AgentUnavailable
 from ..artifact.program import SearchProgram
 from ..atomic_io import atomic_write_json
 from ..env.openai_client import BudgetExceeded, step_cost_delta
-from ..env.sandbox import SandboxError
-from ..reward.objectives import MetricVector, QUALITY_KEYS
+from ..env.errors import SandboxError
+from ..reward.objectives import MetricVector
 from .gate import Gate
 from .pool import CandidatePool
 from .rejected_buffer import RejectedBuffer
@@ -75,7 +75,12 @@ class FastLoop:
                 blend[k.strip()] = float(w)
         self._gate = Gate(mode=getattr(cfg, "gate_mode", "strict"),
                           metric=cfg.gate_metric, blend=blend or None,
-                          max_complexity=getattr(cfg, "gate_max_complexity", 0.0))
+                          max_complexity=getattr(cfg, "gate_max_complexity", 0.0),
+                          max_tokens=getattr(cfg, "gate_max_tokens", 0.0),
+                          cost_exp=getattr(cfg, "gate_cost_exp", 0.0),
+                          complexity_exp=getattr(cfg, "gate_complexity_exp", 0.0),
+                          cost_floor=getattr(cfg, "gate_cost_floor", 5e-4),
+                          tokens_floor=getattr(cfg, "gate_tokens_floor", 1.0))
 
     def _probe_queries(self, substrate, n=3):
         idxs = random.Random(self._cfg.gate_seed).sample(substrate.train_idxs, n)
@@ -91,7 +96,10 @@ class FastLoop:
         Splitting reflect_top ~50/50 teaches the optimizer both. Winners are
         currently-passing queries shown as 'do not regress' (success-path
         regularizer; cheap insurance now that the complexity cap is off).
-        -> (failures, wins)."""
+        `summary` is a one-line rollout aggregate (mean recall@20 / recall@100 and
+        the GENERATION/RANKING/MIXED split, same thresholds as `_failure_record`) --
+        the population-level signal that picks the strategy. Error rows -> GENERATION.
+        -> (failures, wins, summary)."""
         def m(r):
             return r["metrics"]
         missed = [r for r in rows
@@ -106,7 +114,50 @@ class FastLoop:
         failures = [self._failure_record(r, bucket) for r, bucket in chosen]
         wins = [{"query": r["query"], "metrics": m(r)} for r in rows
                 if not r.get("error") and m(r)["hit@1"] >= 1.0][:3]
-        return failures, wins
+        # Aggregate rollout header (run11 fix): mean recall@20 / recall@100 and the
+        # GENERATION/RANKING/MIXED split via the SAME thresholds as _failure_record
+        # (r100>=0.999 RANKING; r100>r20+1e-9 MIXED; else GENERATION). Error rows
+        # carry no metrics -> recall 0 -> GENERATION; means guarded by max(1, N).
+        # One line; rendered above the per-query failures by format_evidence(summary=).
+        n_rows = max(1, len(rows))
+        tot_r20 = tot_r100 = 0.0
+        n_gen = n_rank = n_mixed = 0
+        for r in rows:
+            metrics = r.get("metrics") or {}
+            r20 = metrics.get("recall@20", 0.0)
+            r100 = r.get("recall@100", 0.0)
+            tot_r20 += r20
+            tot_r100 += r100
+            if r100 >= 0.999:
+                n_rank += 1
+            elif r100 > r20 + 1e-9:
+                n_mixed += 1
+            else:
+                n_gen += 1
+        mean_r20 = tot_r20 / n_rows
+        mean_r100 = tot_r100 / n_rows
+        if n_rank >= n_gen:
+            hint = ("Most misses are RANKING -- gold is reachable but mis-ranked; "
+                    "prioritize scoring/rerank.")
+        else:
+            hint = "Gold often not generated -- prioritize broader/graph retrieval."
+        summary = (f"## Rollout summary ({len(rows)} train queries): mean "
+                   f"recall@20={mean_r20:.2f}, mean recall@100={mean_r100:.2f}. "
+                   f"Failure mix: {n_rank} RANKING / {n_mixed} MIXED / "
+                   f"{n_gen} GENERATION. {hint}")
+        # Phase-2 co-optimize: if the adapter probed the built graph, add an
+        # INGESTION-vs-SEARCH split so the optimizer knows which side to edit.
+        ga = [(r.get("graph_attribution") or "") for r in rows]
+        ga = [g.split()[0] for g in ga if g]            # leading bucket token
+        if ga:
+            n_ing = sum(g in ("NOT_INGESTED", "ORPHANED") for g in ga)
+            n_srch = sum(g in ("UNREACHABLE", "RANKING") for g in ga)
+            side = ("ingestion (build a richer graph)" if n_ing > n_srch
+                    else "search (traverse/rank better)")
+            summary += (f" Graph attribution: {n_ing} INGESTION "
+                        f"(NOT_INGESTED/ORPHANED) / {n_srch} SEARCH "
+                        f"(UNREACHABLE/RANKING) -> lean on {side}.")
+        return failures, wins, summary
 
     def _failure_record(self, r, bucket):
         """One reflection entry: missed-gold texts, the top non-gold nodes that
@@ -136,12 +187,26 @@ class FastLoop:
         else:
             attribution = ("GENERATION (gold not in top-100, fix generation: "
                            "reformulate / expand / broaden retrieval)")
+        # Phase-2 co-optimize (ingest_search target): when the reward adapter has
+        # probed the BUILT graph read-only, it attaches a graph-level attribution
+        # that distinguishes an INGESTION failure from a SEARCH failure -- the
+        # signal recall@100 alone cannot give (recall is blind to whether the gold
+        # node was ever ingested). Prefer it; it names which side to fix:
+        #   NOT_INGESTED -> gold node absent  (ingestion fix: add extractor / edge)
+        #   ORPHANED     -> node present, no path from any seed (ingestion fix)
+        #   UNREACHABLE  -> path exists, search didn't reach it (search fix: depth/limit)
+        #   RANKING      -> retrieved but ranked out (search fix: scoring)
+        # graph_search / function rows never carry it -> behaviour unchanged.
+        graph_attr = r.get("graph_attribution")
+        if graph_attr:
+            attribution = graph_attr
         return {
             "query": r["query"],
             "bucket": bucket,
             "metrics": r["metrics"],
             "recall@100": r100,
             "attribution": attribution,
+            "graph_attribution": graph_attr,
             "empty_result": len(retrieved) == 0,
             "missed_gold": [(i, texts.get(i, "")[:200]) for i in missed_ids],
             "top_wrong": [(i, s, texts.get(i, "")[:200]) for i, s in wrong],
@@ -156,6 +221,8 @@ class FastLoop:
             return mv.get(self._gate.metric)
         if self._gate.mode == "blend":
             return self._gate.composite(mv)
+        if self._gate.mode == "value":
+            return self._gate.value(mv)
         return mv.primary  # dominance: fall back to recall@20 for a scalar view
 
     def _score_candidate(self, cand, cand_fn, gate_idxs, ckey, cache):
@@ -183,6 +250,20 @@ class FastLoop:
                                    per_query_timeout_s=self._cfg.probe_timeout_s)
         cache.put(ckey, s)
         return s, False, time.time() - t
+
+    def _score_promote(self, cand, cand_fn, idxs, cache):
+        """Score a candidate on the dedicated promotion slice C (run10c). C is
+        fixed and disjoint from the gate, so sha alone is the cache key (memoized
+        under a 'promote:' prefix in the same persisted score cache -- a re-promote
+        of the same sha across a resume is a pure hit). -> MetricVector."""
+        ck = f"promote:{cand.sha}"
+        s = cache.get(ck)
+        if s is not None:
+            return s
+        s = self._reward.score(cand_fn, idxs, src=cand.src,
+                               per_query_timeout_s=self._cfg.probe_timeout_s)
+        cache.put(ck, s)
+        return s
 
     def _parallel_scoring_enabled(self):
         """Phase 2 guard: process-parallel scoring is only correct when it is OFF by
@@ -255,7 +336,9 @@ class FastLoop:
                 break
             try:
                 mv = self._reward.score(get_fn(p), sel_idxs, src=p.src,
-                                        per_query_timeout_s=cfg.probe_timeout_s)
+                                        per_query_timeout_s=(getattr(
+                                            cfg, "select_timeout_s", None)
+                                            or cfg.probe_timeout_s))
             except BudgetExceeded as e:
                 print(f"[fast_loop] final bake-off: BudgetExceeded ({e}) -- "
                       f"falling back to best scored so far")
@@ -361,7 +444,7 @@ class FastLoop:
                        num_workers=1, steps=0).config_hash()
 
     def _save_checkpoint(self, run_dir, *, step, gate_tag, best_prog, best, pool,
-                         n_accepted, steps_run, stale, stop_stale_ctr):
+                         n_accepted, steps_run, stale, stop_stale_ctr, generation=0):
         """Single atomic JSON snapshot of the whole live campaign (NOT openEvolve's
         one-file-per-program layout -- graphretr's pool is small/bounded so a single
         temp+replace write is simpler and correct). RNG state is deliberately NOT
@@ -382,6 +465,7 @@ class FastLoop:
             "steps_run": steps_run,
             "stale": stale,
             "stop_stale_ctr": stop_stale_ctr,
+            "generation": generation,
             "best": best_block,
             "pool": pool.to_dict(),
         }
@@ -410,7 +494,8 @@ class FastLoop:
             return None
         return blob
 
-    def run(self, substrate, seed_program, steps, campaign) -> ArmResult:
+    def run(self, substrate, seed_program, steps, campaign,
+            seed_pool=None) -> ArmResult:
         cfg = self._cfg
         run_dir = os.path.join(cfg.runs_dir, campaign)
         acc_dir = os.path.join(run_dir, "accepted")
@@ -439,10 +524,18 @@ class FastLoop:
         # --- run-6 search controls -------------------------------------------
         pool_on = bool(getattr(cfg, "pool_enabled", False))
         pool_cap = int(getattr(cfg, "pool_cap", 24) or 24)
+        pool_max_tokens = float(getattr(cfg, "gate_max_tokens", 0.0) or 0.0)
         mb_size = int(getattr(cfg, "minibatch_size", 0) or 0)
         meta_every = int(getattr(cfg, "meta_eval_every", 0) or 0)
         meta_idxs = list(getattr(substrate, "meta_holdout_idxs", []) or [])
-        pool = CandidatePool(cap=pool_cap)
+        # Cascaded promotion (run10c): the cheap fixed gate makes a candidate
+        # eligible; the exported headline best only moves if it ALSO clears the
+        # incumbent on this disjoint slice by `promote_margin`. Empty slice (e.g.
+        # the graph_search path, which has no promote_idxs) => B-gate-only.
+        promote_idxs = list(getattr(substrate, "promote_idxs", []) or [])
+        promote_on = bool(promote_idxs)
+        promote_margin = float(getattr(cfg, "promote_margin", 0.0) or 0.0)
+        pool = CandidatePool(cap=pool_cap, max_tokens=pool_max_tokens)
         fn_cache = {}
 
         def _get_fn(p):
@@ -471,7 +564,7 @@ class FastLoop:
         # rebuilding the population empty and replaying.
         start_step = 0
         resumed = False
-        stale_resume = stop_resume = n_acc_resume = steps_run_resume = 0
+        stale_resume = stop_resume = n_acc_resume = steps_run_resume = gen_resume = 0
         blob = self._load_checkpoint(run_dir) if bool(getattr(cfg, "resume", False)) else None
         if blob is not None:
             try:
@@ -485,9 +578,11 @@ class FastLoop:
                 best_fn = self._sandbox.compile(best_prog.src)
                 fn_cache[best_prog.sha] = best_fn
                 pool = CandidatePool.from_dict(blob["pool"], validate=_compiles)
+                pool.max_tokens = pool_max_tokens  # cap not serialized; re-apply
                 start_step = int(blob["last_step"]) + 1
                 stale_resume = int(blob.get("stale", 0))
                 stop_resume = int(blob.get("stop_stale_ctr", 0))
+                gen_resume = int(blob.get("generation", 0))
                 n_acc_resume = int(blob.get("n_accepted", 0))
                 steps_run_resume = int(blob.get("steps_run", 0))
                 # Re-establish `best` on the gate epoch we resume INTO (the stored
@@ -507,7 +602,7 @@ class FastLoop:
                       f"({type(e).__name__}: {e}) -- starting fresh")
                 blob, resumed, start_step = None, False, 0
                 fn_cache.clear()
-                pool = CandidatePool(cap=pool_cap)
+                pool = CandidatePool(cap=pool_cap, max_tokens=pool_max_tokens)
 
         if not resumed:
             best_prog = seed_program
@@ -522,8 +617,46 @@ class FastLoop:
                 cache.put(_ckey(best_prog.sha), best)
             pool.consider(best_prog, best)
             print(f"[fast_loop] seed gate ({time.time()-t0:.0f}s): "
-                  f"{ {k: round(best.get(k), 4) for k in QUALITY_KEYS} }"
+                  f"{ {k: round(v, 4) for k, v in best.quality.items()} }"
                   + (f"  [pool ON cap={pool_cap}]" if pool_on else "  [single incumbent]"))
+            # Merge warm-start (archipelago tournament-merge): admit each champion
+            # in seed_pool into the breeding pool so COMBINE has >=2 distinct
+            # parents from step 0. Score on the SAME gate_idxs as the seed so the
+            # per_query keys align for sole-best counting (pool._sole_best_counts).
+            # A champion from a different architecture may exceed the token wall;
+            # lift it for warm-start admission only (these are real champions, not
+            # bloat candidates), then restore so later mutations still face it.
+            if seed_pool:
+                saved_wall = pool.max_tokens
+                pool.max_tokens = 0.0
+                for wp in seed_pool:
+                    if wp.sha in pool.shas():
+                        continue
+                    wfn = self._sandbox.compile(wp.src)
+                    self._sandbox.probe(wfn, probes, cfg.probe_timeout_s)
+                    fn_cache[wp.sha] = wfn
+                    wmv = cache.get(_ckey(wp.sha))
+                    if wmv is None:
+                        wmv = self._reward.score(wfn, gate_idxs, src=wp.src,
+                                                 per_query_timeout_s=cfg.probe_timeout_s)
+                        cache.put(_ckey(wp.sha), wmv)
+                    if getattr(wmv, "crashed", False):
+                        print(f"[fast_loop] merge warm-start {wp.sha[:8]} CRASHED "
+                              f"-- not admitted", flush=True)
+                        continue
+                    admitted = pool.consider(wp, wmv)[1]
+                    print(f"[fast_loop] merge warm-start {wp.sha[:8]} "
+                          f"recall@20={wmv.get('recall@20'):.4f} "
+                          f"admitted={admitted}", flush=True)
+                pool.max_tokens = saved_wall
+                if bool(getattr(cfg, "merge", False)) and len(pool) < 2:
+                    print("[fast_loop] merge: <2 distinct champions admitted; "
+                          "combine inert (degrades to single-seed run)", flush=True)
+        # Incumbent's promotion-slice score (run10c): the bar a candidate must
+        # clear by `promote_margin` to move the exported best. Computed once here
+        # (cache hit on resume); not stored in the checkpoint -- the 'promote:' key
+        # persists in the score cache, so it re-derives for free.
+        best_C = self._score_promote(best_prog, best_fn, promote_idxs, cache) if promote_on else None
         self._tracker.log_vector("best_", best, step=(start_step - 1))
 
         # Plateau handling: escalate to the architect tier and stop the campaign
@@ -537,6 +670,17 @@ class FastLoop:
         # (Phase 2 -- the two signals are no longer conflated).
         stale = stale_resume
         stop_stale_ctr = stop_resume
+        # Generation restart (run10c): a "generation" is a run of steps until
+        # `stop_after_stale` consecutive non-promotions. On that stall, instead of
+        # halting, bump the generation and restart from the Pareto set in COMBINE
+        # mode (the mutator synthesizes two members). Stay in combine mode once
+        # entered. max_generations=1 (default) => first stall stops (old behaviour).
+        max_generations = int(getattr(cfg, "max_generations", 1) or 1)
+        generation = gen_resume
+        # Force COMBINE from step 0 on a merge run (archipelago tournament-merge):
+        # the pool is warm-started below with >=2 champions, so the mutator should
+        # synthesize two members from the start, not wait for a generation stall.
+        combine_mode = generation > 0 or bool(getattr(cfg, "merge", False))
 
         # --- auditability baselines (Phase B cost split, Phase C lineage) ----
         # Snapshot the budget AFTER seed scoring + embedder warmup so warmup spend
@@ -581,7 +725,7 @@ class FastLoop:
             self._save_checkpoint(
                 run_dir, step=step, gate_tag=gate_tag, best_prog=best_prog,
                 best=best, pool=pool, n_accepted=n_accepted, steps_run=steps_run,
-                stale=stale, stop_stale_ctr=stop_stale_ctr)
+                stale=stale, stop_stale_ctr=stop_stale_ctr, generation=generation)
 
         last_completed = start_step - 1
         try:
@@ -605,10 +749,16 @@ class FastLoop:
 
             # Phase A3: pick the parent from the pool (sole-best-weighted) instead
             # of always descending the single incumbent.
+            mate_prog = None
             if pool_on and len(pool):
                 parent_rng = random.Random(cfg.gate_seed * 911 + step)
                 parent_prog = pool.select_parent(
                     parent_rng, discount=bool(getattr(cfg, "pool_discount", True))).program
+                # Combine mode (generation restart): pick a SECOND, distinct Pareto
+                # member to synthesize with the parent (KernelEvolve sibling-insight).
+                if combine_mode and len(pool) >= 2:
+                    mate = pool.select_mate(parent_rng, exclude_sha=parent_prog.sha)
+                    mate_prog = mate.program if mate else None
             else:
                 parent_prog = best_prog
             parent_sha = parent_prog.sha
@@ -624,14 +774,18 @@ class FastLoop:
             if reuse:
                 rows = self._rows_by_sha[parent_sha]
             else:
-                ridxs = random.Random(cfg.gate_seed + step).sample(
+                # FIXED explore/failure-mining set (run10c): seed has no `+ step`,
+                # so every step mines failures from the SAME train queries. This
+                # gives the mutator a consistent problem set -- it can see whether
+                # last step's edit fixed the queries it targeted (was step-rotated).
+                ridxs = random.Random(cfg.gate_seed).sample(
                     substrate.train_idxs, cfg.rollout_batch)
                 _, rows = self._reward.score(parent_fn, ridxs, src=parent_prog.src,
                                              return_rows=True,
                                              per_query_timeout_s=cfg.probe_timeout_s)
                 if getattr(cfg, "target", None) == "graph_search":
                     self._rows_by_sha[parent_sha] = rows
-            fails, wins = self._reflect(rows, cfg.reflect_top)
+            fails, wins, summary = self._reflect(rows, cfg.reflect_top)
 
             L_t = self._edit_budget.L_t(step)
             plateau = bool(arch_plateau and stale >= arch_plateau)
@@ -652,7 +806,9 @@ class FastLoop:
                 cand, transcript, meta = self._mutator.propose(
                     parent_prog, fails, wins, buffer.recent(), L_t,
                     plateau=plateau, validate=_validate,
-                    repair_budget=int(getattr(cfg, "repair_budget", 0) or 0))
+                    repair_budget=int(getattr(cfg, "repair_budget", 0) or 0),
+                    accepted_entries=buffer.accepted(), combine_with=mate_prog,
+                    summary=summary)
             except AgentUnavailable as e:
                 # CLI limits reached: stop the campaign here, keep the incumbent
                 # as best, and fall through to the normal save-and-return path so
@@ -696,7 +852,7 @@ class FastLoop:
                             "llm_seconds": llm_seconds, "score_seconds": 0.0,
                             "edit_budget": L_t}
             reason, s = "", None
-            admitted, frontier_grew = False, False
+            admitted, frontier_grew, promoted = False, False, False
             # probe_failed is now a COUNT from propose: how many times a parsed,
             # in-budget candidate failed the sandbox/probe this step (>=1 when
             # self-repair was exercised, whether or not it ultimately succeeded).
@@ -732,10 +888,23 @@ class FastLoop:
                     step_metrics["score_seconds"] = sec
                     self._tracker.log_vector("val_", s, step=step)
                     frontier_grew, admitted = pool.consider(cand, s)
-                    # headline gate (blend) -- updates the monotone reported best.
+                    # Cascaded accept (run10c): the cheap fixed gate (B) makes a
+                    # candidate eligible; the exported headline best only moves if
+                    # it ALSO clears the incumbent on the disjoint promotion slice
+                    # C by `promote_margin` (the n=100 noise/overfit guard). With
+                    # no promotion slice this degrades to the old B-only gate.
                     if self._gate.accept(s, best):
-                        best_prog, best_fn, best = cand, cand_fn, s
-                        cand.save(os.path.join(acc_dir, f"step_{step:03d}.py"))
+                        if promote_on:
+                            cand_C = self._score_promote(cand, cand_fn, promote_idxs, cache)
+                            promoted = (self._gate_value(cand_C)
+                                        > self._gate_value(best_C) + promote_margin)
+                            if promoted:
+                                best_prog, best_fn, best, best_C = cand, cand_fn, s, cand_C
+                        else:
+                            promoted = True
+                            best_prog, best_fn, best = cand, cand_fn, s
+                        if promoted:
+                            cand.save(os.path.join(acc_dir, f"step_{step:03d}.py"))
                     cap = self._gate.max_complexity
                     if s.crashed:
                         reason = "crashed on gate"
@@ -759,13 +928,26 @@ class FastLoop:
                 stale = 0
             else:
                 stale += 1
-            # Phase 2: the stop counter is decoupled from frontier growth -- it
-            # resets on any admission (frontier OR sole-best), so a real specialist
-            # admission no longer counts toward the stop.
-            if self._is_stop_progress(pool_on, admitted, accepted):
+            # The stop counter resets on real progress. With a promotion slice
+            # (run10c) that means a confirmed PROMOTION -- the run ends after
+            # `stop_after_stale` steps with no candidate confirmed better on C,
+            # i.e. "we stopped producing a better output on the validate set."
+            # Without it, fall back to Phase-2 semantics: any pool admission
+            # (frontier OR sole-best specialist), decoupled from frontier growth.
+            stop_progress = (promoted if promote_on
+                             else self._is_stop_progress(pool_on, admitted, accepted))
+            if stop_progress:
                 stop_stale_ctr = 0
             else:
                 stop_stale_ctr += 1
+            # Structured EFFICIENCY deltas in the buffer line (post-mortem #5): the
+            # proposer's memory now carries program-size, crash, and $ movement next
+            # to the quality delta -- so "this got bloated/slow/crashy" is a number
+            # it sees, not a buried one-liner. Δtok is vs the incumbent.
+            eff = ""
+            if s is not None:
+                eff = (f", Δtok {s.code_tokens - best.code_tokens:+.0f}"
+                       f", crash {s.crashed_frac:.2f}, ${s.usd_cost:.4f}/q")
             if not accepted:
                 if s is not None:
                     delta = (f"recall@20 {s.get('recall@20') - best.get('recall@20'):+.4f}, "
@@ -773,7 +955,17 @@ class FastLoop:
                 else:
                     delta = "no gate score"
                 gist = parent_prog.change_summary(cand) if cand else "(no candidate)"
-                buffer.add(step, f"{gist} => {delta}; {reason}")
+                buffer.add(step, f"{gist} => {delta}{eff}; {reason}")
+                buffer.save(buf_path)
+            elif cand is not None:
+                # positive memory (run-7/8 mode-collapse fix): remember WHAT
+                # improved / got admitted so the proposer builds on winning ideas,
+                # not just avoids dead ends.
+                d = (f"recall@20 {s.get('recall@20'):.3f}, mrr {s.get('mrr'):.3f}"
+                     if s is not None else "admitted")
+                buffer.add(step,
+                           f"{parent_prog.change_summary(cand)} => {d}{eff}; {reason}",
+                           outcome="accept")
                 buffer.save(buf_path)
 
             # per-step cost split (Phase B): OpenAI spend delta, accept-vs-reject,
@@ -809,15 +1001,19 @@ class FastLoop:
             # rejected -- a rejected edit tells the proposer what not to retry.
             change_summary = (parent_prog.change_summary(cand) if cand
                               else "(no candidate)")
-            tier = "architect" if plateau else "editor"
+            tier = ("combine" if mate_prog is not None
+                    else "architect" if plateau else "editor")
             lineage_fh.write(json.dumps({
                 "step": step,
+                "generation": generation,
                 "parent_sha": parent_sha,
+                "mate_sha": mate_prog.sha if mate_prog is not None else None,
                 "child_sha": cand.sha if cand else None,
                 "change_summary": change_summary,
                 "metric_vector": s.as_flat() if s is not None else None,
                 "accepted": bool(accepted),
                 "admitted": bool(admitted),
+                "promoted": bool(promoted),
                 "frontier_grew": bool(frontier_grew),
                 "pool_size": len(pool),
                 "reason": reason or "accepted",
@@ -858,21 +1054,38 @@ class FastLoop:
 
             self._tracker.log_vector("best_", best, step=step)
             self._tracker.log_metrics(step_metrics, step=step)
-            status = "ACCEPT" if accepted else f"reject ({reason})"
+            status = ("PROMOTE" if promoted
+                      else "admit" if accepted else f"reject ({reason})")
             cand_r = f"{s.get('recall@20'):.4f}" if s else "-"
             print(f"[fast_loop] step {step:02d} {status}  cand recall@20={cand_r} "
                   f"best={best.get('recall@20'):.4f}  L={L_t} {tier} "
-                  f"pool={len(pool)} stale={stale} stop_stale={stop_stale_ctr}  "
-                  f"({time.time()-t_step:.0f}s)")
+                  f"pool={len(pool)} gen={generation} stale={stale} "
+                  f"stop_stale={stop_stale_ctr}  ({time.time()-t_step:.0f}s)")
             last_completed = step
             if checkpoint_every and (step + 1) % checkpoint_every == 0:
                 _checkpoint(step)
             if stop_stale and stop_stale_ctr >= stop_stale:
-                kind = "no admission (frontier or sole-best)" if pool_on else "non-accepts"
-                print(f"[fast_loop] STOPPING at step {step}: {stop_stale_ctr} consecutive "
-                      f"stale steps ({kind}, >= stop_after_stale={stop_stale})", flush=True)
-                self._tracker.log_metrics({"stopped_stale_at": step}, step=step)
-                break
+                kind = ("no promotion" if promote_on
+                        else "no admission (frontier or sole-best)" if pool_on
+                        else "non-accepts")
+                generation += 1
+                if generation >= max_generations:
+                    print(f"[fast_loop] STOPPING at step {step}: {stop_stale_ctr} "
+                          f"consecutive stale steps ({kind}) and generation "
+                          f"{generation} >= max_generations={max_generations}", flush=True)
+                    self._tracker.log_metrics({"stopped_stale_at": step}, step=step)
+                    break
+                # Restart from the Pareto set instead of halting: keep the pool +
+                # incumbent, reset the stall counters, and enter COMBINE mode so the
+                # mutator synthesizes two Pareto members from here on.
+                combine_mode = True
+                stop_stale_ctr = 0
+                stale = 0
+                print(f"[fast_loop] GENERATION {generation}: stalled after "
+                      f"{stop_stale} steps ({kind}) -- restarting from the Pareto "
+                      f"set (pool={len(pool)}) in COMBINE mode", flush=True)
+                self._tracker.log_metrics({"generation": generation,
+                                           "generation_restart_at": step}, step=step)
             if shutdown["requested"]:
                 print(f"[fast_loop] STOPPING at step {step}: shutdown requested "
                       f"-- checkpointing and finalizing", flush=True)
@@ -919,14 +1132,14 @@ class FastLoop:
         seed_program.save(os.path.join(run_dir, "seed_used.py"))
         with open(os.path.join(run_dir, "seed_vs_best.diff"), "w") as f:
             f.write(seed_program.diff(best_prog, max_lines=10_000))
-        print(f"[fast_loop] done. best: { {k: round(best.get(k), 4) for k in QUALITY_KEYS} }")
+        print(f"[fast_loop] done. best: { {k: round(v, 4) for k, v in best.quality.items()} }")
         return ArmResult(best_prog.family, best_prog, best, run_dir)
 
-    def _minibatch_eps(self, mb_size):
+    def _minibatch_eps(self, mb_size, cfg):
         """Tolerance band for the pre-screen. `minibatch_eps` if set, else 1/b
         (~0.05 at b=20) -- one query's worth of the subsample, the smallest
         meaningful resolution on a b-query draw (post-mortem #4)."""
-        return (float(getattr(self._cfg, "minibatch_eps", 0.0) or 0.0)
+        return (float(getattr(cfg, "minibatch_eps", 0.0) or 0.0)
                 or (1.0 / mb_size if mb_size else 0.0))
 
     def _minibatch_ok(self, cache, best_prog, best_fn, cand, cand_fn,
@@ -957,4 +1170,4 @@ class FastLoop:
         c_mb = self._reward.score(cand_fn, mb_idxs, src=cand.src,
                                   per_query_timeout_s=cfg.probe_timeout_s)
         cache.put(f"mb:{cand.sha}@{gate_tag}", c_mb)
-        return self._gate_value(c_mb) >= self._gate_value(b_mb) - self._minibatch_eps(mb_size)
+        return self._gate_value(c_mb) >= self._gate_value(b_mb) - self._minibatch_eps(mb_size, cfg)

@@ -10,8 +10,8 @@ never cross the SearchTarget seam).
 from graphretr_opt.artifact.file_set import FileSet
 from graphretr_opt.env.search_target import CostMeter, SearchResult
 from graphretr_opt.env.targets.fake_target import FakeSearchTarget
-from graphretr_opt.reward.mcq_reward import McqReward
-from graphretr_opt.reward.qa_objectives import (MCQ_PRIMARY, mcq_dominates,
+from graphsearch.reward.mcq_reward import McqReward
+from graphsearch.reward.qa_objectives import (MCQ_PRIMARY, mcq_dominates,
                                                 mcq_objective_tuple)
 
 FS = FileSet("/b", {"a.py": "x = 1\n"}, ("a.py",))

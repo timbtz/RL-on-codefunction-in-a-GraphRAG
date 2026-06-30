@@ -11,7 +11,7 @@ Run: PYTHONPATH=$PWD/src .venv/bin/python -m tests.test_self_repair
 No FalkorDB / no network / no API key needed (agent + validate are stubbed).
 """
 from graphretr_opt.artifact.program import SearchProgram
-from graphretr_opt.env.sandbox import SAFE_BUILTINS, SandboxError
+from graphretr_opt.env.errors import SAFE_BUILTINS, SandboxError
 from graphretr_opt.optimizer.mutator import Mutator
 
 
