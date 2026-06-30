@@ -56,6 +56,20 @@ def main(argv=None):
     ps.add_argument("--fake-target", action="store_true",
                     help="use FakeSearchTarget (offline: no Neo4j / API keys)")
 
+    pis = sub.add_parser("optimize-ingest-search",
+                         help="Phase-2 co-optimize: evolve graph INGESTION (TS) + "
+                              "SEARCH (py) together; two-phase tsx ingest -> Neo4j "
+                              "-> search -> MCQ exam, metered on total ingest+search USD")
+    pis.add_argument("--steps", type=int, default=None)
+    pis.add_argument("--campaign-name", default="ingest_search")
+    pis.add_argument("--resume", action="store_true",
+                     help="resume from runs/<campaign>/checkpoint.json if present")
+    pis.add_argument("--checkpoint-every", type=int, default=None,
+                     help="atomically snapshot the live pool every N steps (0=off)")
+    pis.add_argument("--llm-extraction", action="store_true",
+                     help="enable the metered LLM-extraction lever in ingest (M4); "
+                          "default OFF = zero-LLM rule-based ingest seed")
+
     pf = sub.add_parser("final", help="score seed+best on the locked test split once")
     pf.add_argument("--campaign-name", required=True)
     pf.add_argument("--strategy", default=None,
@@ -145,6 +159,18 @@ def main(argv=None):
         overrides["target"] = "graph_search"
         if getattr(args, "fake_target", False):
             overrides["fake_target"] = True
+        camp = Campaign(load_config(**overrides)).boot()
+        camp.optimize_search(steps=args.steps, campaign=args.campaign_name)
+        return
+
+    if args.cmd == "optimize-ingest-search":
+        # Phase-2 co-optimize path: cfg.target drives boot() -> boot_ingest_search()
+        # (TS ingest + py search, two-phase reward, total-USD Pareto). Reuses the
+        # graph_search loop runner (optimize_search) since boot_ingest_search sets
+        # the same search_* attrs.
+        overrides["target"] = "ingest_search"
+        if getattr(args, "llm_extraction", False):
+            overrides["ingest_llm_extraction"] = True
         camp = Campaign(load_config(**overrides)).boot()
         camp.optimize_search(steps=args.steps, campaign=args.campaign_name)
         return

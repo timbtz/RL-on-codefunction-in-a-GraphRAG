@@ -150,7 +150,7 @@ class Config:
     merge_seed_paths: tuple = ()            # tuple => hashable; yaml list coerced below
 
     # --- graph_search target (the real agentic search service) --------------
-    target: str = "function"               # function | graph_search
+    target: str = "function"               # function | graph_search | ingest_search
     graphsearch_src: str = "graphsearch/src"          # base checkout to overlay
     dataset_path: str = "graphsearch/data/dataset.json"  # gold MCQ set
     editable_files: tuple = (
@@ -186,6 +186,33 @@ class Config:
     # (keep seed composite > 0: weight < seed_accuracy / seed_usd_cost).
     search_cost_weight: float = 5.0
 
+    # --- ingest_search target (Phase-2 co-optimize ingestion + search) -------
+    # ONE candidate spans BOTH the TS graph-ingestion code AND the Python search
+    # code, evaluated by a two-phase rollout: `tsx ingest.ts -> Neo4j(graph_<hash>)
+    # -> python search.py -> judge-free MCQ exam`. The two editable files live in
+    # DIFFERENT packages, so their relpaths are anchored at the monorepo root
+    # (repo_root), not at graphsearch_src. The IngestSearchRewardAdapter owns the
+    # cross-tree materialization + the per-ingest-hash graph cache.
+    #
+    # Tight-scope discipline (README Phase-2 bloat warning): start with 2 editable
+    # files; widen only after the seam is stable. M2 = search.py only; M3 adds
+    # extract.ts.
+    ingest_editable_files: tuple = (
+        "graphmod/src/ingestion/extract.ts",
+        "graphsearch/src/search/search.py",
+    )                                       # relpaths from repo_root (tuple => hashable)
+    corpus_dir: str = "graphsearch/data/corpus"          # the tiny fixed corpus
+    graphmod_dir: str = "graphmod"                       # TS ingestion package root
+    ingest_cost_path: str = "graphmod/ingest_cost.json"  # TS writes, adapter reads
+    ingest_schema_path: str = "graphmod/schema.json"     # export-schema output
+    # per-candidate graph isolation: a fresh Neo4j database named graph_<hash> is
+    # (re)built only when the ingestion .ts overlay changes; search-only edits reuse
+    # the cached graph. Empty -> adapter derives graph_<ingest_hash>.
+    ingest_db_prefix: str = "graph_"
+    ingest_llm_extraction: bool = False     # M4 lever master switch (seed = OFF,
+                                            # zero-LLM ingest). The optimizer turns
+                                            # it on per-field inside extract.ts.
+
     @property
     def runs_dir(self):
         return os.path.join(self.root, "runs")
@@ -213,6 +240,23 @@ class Config:
     @property
     def dataset_path_abs(self):
         return self._resolve(self.dataset_path)
+
+    # --- ingest_search abs paths (resolved against the monorepo root) --------
+    @property
+    def corpus_dir_abs(self):
+        return self._resolve(self.corpus_dir)
+
+    @property
+    def graphmod_dir_abs(self):
+        return self._resolve(self.graphmod_dir)
+
+    @property
+    def ingest_cost_path_abs(self):
+        return self._resolve(self.ingest_cost_path)
+
+    @property
+    def ingest_schema_path_abs(self):
+        return self._resolve(self.ingest_schema_path)
 
     @property
     def opt_src_abs(self):
@@ -321,6 +365,8 @@ def load_config(**overrides) -> Config:
         kw["stark_editable_files"] = tuple(kw["stark_editable_files"])
     if isinstance(kw.get("merge_seed_paths"), list):  # yaml -> tuple (hashable)
         kw["merge_seed_paths"] = tuple(kw["merge_seed_paths"])
+    if isinstance(kw.get("ingest_editable_files"), list):  # yaml -> tuple (hashable)
+        kw["ingest_editable_files"] = tuple(kw["ingest_editable_files"])
     # The z.ai backend speaks GLM, not Claude: default any leftover claude-*
     # model slug to glm-5.2 so MUTATOR_BACKEND=zai alone is sufficient and a
     # stale claude slug can't 404. A non-claude slug the user set is respected.

@@ -145,6 +145,18 @@ class FastLoop:
                    f"recall@20={mean_r20:.2f}, mean recall@100={mean_r100:.2f}. "
                    f"Failure mix: {n_rank} RANKING / {n_mixed} MIXED / "
                    f"{n_gen} GENERATION. {hint}")
+        # Phase-2 co-optimize: if the adapter probed the built graph, add an
+        # INGESTION-vs-SEARCH split so the optimizer knows which side to edit.
+        ga = [(r.get("graph_attribution") or "") for r in rows]
+        ga = [g.split()[0] for g in ga if g]            # leading bucket token
+        if ga:
+            n_ing = sum(g in ("NOT_INGESTED", "ORPHANED") for g in ga)
+            n_srch = sum(g in ("UNREACHABLE", "RANKING") for g in ga)
+            side = ("ingestion (build a richer graph)" if n_ing > n_srch
+                    else "search (traverse/rank better)")
+            summary += (f" Graph attribution: {n_ing} INGESTION "
+                        f"(NOT_INGESTED/ORPHANED) / {n_srch} SEARCH "
+                        f"(UNREACHABLE/RANKING) -> lean on {side}.")
         return failures, wins, summary
 
     def _failure_record(self, r, bucket):
@@ -175,12 +187,26 @@ class FastLoop:
         else:
             attribution = ("GENERATION (gold not in top-100, fix generation: "
                            "reformulate / expand / broaden retrieval)")
+        # Phase-2 co-optimize (ingest_search target): when the reward adapter has
+        # probed the BUILT graph read-only, it attaches a graph-level attribution
+        # that distinguishes an INGESTION failure from a SEARCH failure -- the
+        # signal recall@100 alone cannot give (recall is blind to whether the gold
+        # node was ever ingested). Prefer it; it names which side to fix:
+        #   NOT_INGESTED -> gold node absent  (ingestion fix: add extractor / edge)
+        #   ORPHANED     -> node present, no path from any seed (ingestion fix)
+        #   UNREACHABLE  -> path exists, search didn't reach it (search fix: depth/limit)
+        #   RANKING      -> retrieved but ranked out (search fix: scoring)
+        # graph_search / function rows never carry it -> behaviour unchanged.
+        graph_attr = r.get("graph_attribution")
+        if graph_attr:
+            attribution = graph_attr
         return {
             "query": r["query"],
             "bucket": bucket,
             "metrics": r["metrics"],
             "recall@100": r100,
             "attribution": attribution,
+            "graph_attribution": graph_attr,
             "empty_result": len(retrieved) == 0,
             "missed_gold": [(i, texts.get(i, "")[:200]) for i in missed_ids],
             "top_wrong": [(i, s, texts.get(i, "")[:200]) for i, s in wrong],

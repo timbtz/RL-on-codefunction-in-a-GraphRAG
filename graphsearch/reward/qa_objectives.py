@@ -29,7 +29,7 @@ def mcq_objective_tuple(mv):
     unit. latency is the secondary cost axis. All "higher is better" after
     sign-flipping costs."""
     return (mv.get("mcq_accuracy"), mv.get("retrieval_hit"),
-            -mv.usd_cost, -mv.latency_s)
+            -mv.total_usd_per_query, -mv.latency_s)
 
 
 def mcq_dominates(a, b) -> bool:

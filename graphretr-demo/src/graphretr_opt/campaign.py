@@ -81,6 +81,8 @@ class Campaign:
         engine reads it here instead of the caller picking boot vs boot_search."""
         if self.cfg.target == "graph_search":
             return self.boot_search()
+        if self.cfg.target == "ingest_search":
+            return self.boot_ingest_search()
         return self._boot_function()
 
     def _boot_function(self):
@@ -289,6 +291,62 @@ class Campaign:
         print(f"[campaign] graph_search seed sha={self.search_seed.sha[:8]} "
               f"editable={list(self.search_seed.editable)} "
               f"answerer={'STUB' if used_stub else cfg.answerer_model}")
+        return self
+
+    def boot_ingest_search(self):
+        """Assemble the Phase-2 co-optimize stack: ONE candidate FileSet spanning
+        BOTH the TS graph-ingestion code AND the Python search code, scored by the
+        two-phase IngestSearchRewardAdapter (tsx ingest.ts -> Neo4j -> search.py ->
+        judge-free MCQ exam). Mirrors boot_search but: (a) the seed FileSet is
+        anchored at the monorepo root since its two editable files live in
+        different packages (graphmod + graphsearch); (b) the reward is
+        IngestSearchRewardAdapter, which owns ingest + the per-hash graph cache and
+        meters total ingest+search USD; (c) the gate blends on total_usd_per_query
+        (amortized) so an LLM-extraction ingest edit is admitted only if its
+        accuracy gain clears its amortized build cost."""
+        import sys
+        if self.cfg.repo_root not in sys.path:
+            sys.path.insert(0, self.cfg.repo_root)
+        from graphsearch.qa import QaSubstrate
+        from graphsearch.reward import McqReward, StubAnswerer
+        from .env.null_sandbox import NullGraph, NullSandbox
+        from .artifact.file_set import FileSet
+        from .reward.ingest_search import IngestSearchRewardAdapter
+
+        import json as _json
+        n = len(_json.load(open(self.cfg.dataset_path_abs, encoding="utf-8")))
+        self.cfg = self._search_cfg(self.cfg, n)
+        # Phase-2: the gate must see the AMORTIZED total-pipeline cost (search +
+        # ingest/N), not just search usd, so a richer-but-pricier graph is traded
+        # correctly. total_usd_per_query resolves through MetricVector.get().
+        from dataclasses import replace as _replace
+        self.cfg = _replace(
+            self.cfg,
+            gate_blend=f"mcq_accuracy:1.0,total_usd_per_query:{-self.cfg.search_cost_weight}",
+        )
+        cfg = self.cfg
+
+        self.search_substrate = QaSubstrate(
+            dataset_path=cfg.dataset_path_abs,
+            meta_holdout_size=cfg.meta_holdout_size, meta_seed=cfg.meta_seed)
+
+        answerer = self._build_answerer()
+        mcq = McqReward(answerer, crash_frac_limit=cfg.crash_frac_limit)
+        # target_unused=None: the adapter builds its own in-process search target
+        # (materializes search.py from the overlay, runs it over the per-hash graph).
+        self.search_reward = IngestSearchRewardAdapter(
+            None, mcq, self.search_substrate, cfg,
+            default_timeout_s=cfg.search_timeout_s)
+        # Seed spans both editable files; base = repo_root (relpaths resolve there).
+        self.search_seed = FileSet.from_base(cfg.repo_root, cfg.ingest_editable_files)
+        self.search_sandbox = NullSandbox()
+        self.search_graph = NullGraph()
+        self.budget = None
+        used_stub = isinstance(answerer, StubAnswerer)
+        print(f"[campaign] ingest_search seed sha={self.search_seed.sha[:8]} "
+              f"editable={list(self.search_seed.editable)} "
+              f"answerer={'STUB' if used_stub else cfg.answerer_model} "
+              f"llm_extraction={cfg.ingest_llm_extraction}")
         return self
 
     @staticmethod

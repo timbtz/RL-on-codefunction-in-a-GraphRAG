@@ -62,6 +62,16 @@ class MetricVector:
                                           # against accuracy (not raw call count).
     tokens_in: float = 0.0                # mean input tokens/query (diagnostic)
     tokens_out: float = 0.0               # mean output tokens/query (diagnostic)
+    ingest_usd: float = 0.0               # Phase-2 co-optimize: ONE-TIME USD to
+                                          # BUILD the graph (TS ingest LLM-extraction,
+                                          # read from ingest_cost.json). Amortized
+                                          # across the exam in total_usd_per_query so
+                                          # an expensive richer graph is only worth
+                                          # it if it lifts accuracy BROADLY.
+    ingest_tokens: float = 0.0            # one-time LLM tokens spent during ingest.
+    n_queries: int = 0                    # exam size used to amortize ingest_usd
+                                          # (0 -> treated as 1; per-query search cost
+                                          # is unaffected).
     per_query: dict = field(default_factory=dict)  # Phase A1: idx -> {mrr, hit@1, recall@100}
     primary_key: str = "recall@20"        # R5: which quality axis `primary` reads.
                                           # Default = the function campaign's
@@ -76,6 +86,16 @@ class MetricVector:
         to recall@20 (function campaign); MCQ rewards set primary_key to
         "mcq_accuracy" so dominance ranks on the MCQ axis (Risk R5)."""
         return self.quality.get(self.primary_key, 0.0)
+
+    @property
+    def total_usd_per_query(self) -> float:
+        """Amortized total-pipeline cost: per-query search USD plus the one-time
+        ingest USD spread over the exam. This is the Phase-2 cost axis -- selection
+        on (accuracy vs total_usd_per_query) means an LLM-extraction ingest edit is
+        accepted only if its accuracy gain, averaged over all queries, clears its
+        amortized build cost. Falls back to plain usd_cost when ingest is zero-LLM."""
+        n = max(1, int(self.n_queries))
+        return float(self.usd_cost) + (float(self.ingest_usd) / n)
 
     def get(self, metric: str) -> float:
         """Quality axes first; fall back to top-level cost attrs (usd_cost,
@@ -98,6 +118,8 @@ class MetricVector:
                    code_tokens=self.code_tokens,
                    usd_cost=self.usd_cost, tokens_in=self.tokens_in,
                    tokens_out=self.tokens_out,
+                   ingest_usd=self.ingest_usd, ingest_tokens=self.ingest_tokens,
+                   total_usd_per_query=self.total_usd_per_query,
                    crashed_frac=self.crashed_frac, crashed=float(self.crashed))
         return out
 
@@ -117,7 +139,8 @@ class MetricVector:
                 bad = True
         for attr in ("latency_s", "db_load", "llm_calls", "rerank_items",
                      "code_complexity", "code_tokens", "crashed_frac",
-                     "recall_at_100", "usd_cost", "tokens_in", "tokens_out"):
+                     "recall_at_100", "usd_cost", "tokens_in", "tokens_out",
+                     "ingest_usd", "ingest_tokens", "n_queries"):
             if not _is_finite_number(getattr(self, attr)):
                 setattr(self, attr, 0.0)
                 bad = True
