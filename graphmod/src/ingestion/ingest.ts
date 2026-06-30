@@ -26,6 +26,8 @@ import {
 import { loadMarkdownDir } from "./loaders/markdown";
 import { loadChatFile } from "./loaders/chat";
 import { loadJiraFile } from "./loaders/jira";
+import { loadMeetingsFile } from "./loaders/meetings";
+import { loadGithubFile } from "./loaders/github";
 import {
   ensureVocab,
   writeRoot,
@@ -70,6 +72,8 @@ const NODE_LABELS = [
   "Document",
   "Message",
   "Ticket",
+  "Meeting",
+  "PullRequest",
 ];
 
 /** graphmod/ root directory (this file lives at graphmod/src/ingestion/). */
@@ -131,6 +135,10 @@ export function loadCorpus(corpusDir: string, resolver: Resolver): RawRecord[] {
   if (existsSync(chat)) records.push(...loadChatFile(chat, resolver));
   const tickets = join(corpusDir, "tickets.json");
   if (existsSync(tickets)) records.push(...loadJiraFile(tickets, resolver));
+  const meetings = join(corpusDir, "meetings.json");
+  if (existsSync(meetings)) records.push(...loadMeetingsFile(meetings, resolver));
+  const github = join(corpusDir, "github.json");
+  if (existsSync(github)) records.push(...loadGithubFile(github, resolver));
   return records;
 }
 

@@ -9,6 +9,8 @@ import { ChunkModule } from "./Chunk/chunk.module";
 import { DocModule } from "./Doc/doc.module";
 import { MessageModule } from "./Message/message.module";
 import { TicketModule } from "./Ticket/ticket.module";
+import { MeetingModule } from "./Meeting/meeting.module";
+import { PullRequestModule } from "./PullRequest/pullRequest.module";
 
 export {
     PersonModule,
@@ -18,6 +20,8 @@ export {
     DocModule,
     MessageModule,
     TicketModule,
+    MeetingModule,
+    PullRequestModule,
 };
 
 // Order matters only for readability; export-schema unions them.
@@ -29,4 +33,6 @@ export const CORPUS_MODULES: AnyModule[] = [
     DocModule,
     MessageModule,
     TicketModule,
+    MeetingModule,
+    PullRequestModule,
 ];

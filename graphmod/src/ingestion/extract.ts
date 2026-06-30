@@ -23,6 +23,7 @@ import {
   type RawRecord,
   type RawRef,
   type RelType,
+  type SourceKind,
 } from "./resolve";
 import type { LlmClient, Meter } from "./llm";
 
@@ -83,7 +84,7 @@ interface ChunkSpec {
   id: string;
   index: number;
   content: string;
-  source: "doc" | "chat" | "jira";
+  source: SourceKind;
 }
 
 /** Group structured-ref display names by relationship type. */
@@ -125,6 +126,26 @@ export function buildChunks(rec: RawRecord): ChunkSpec[] {
     card =
       `Message from ${author}: ${String(rec.props.text ?? "")}` +
       clause("References", by.get("REFERENCES"));
+  } else if (rec.label === "Meeting") {
+    const title = String(rec.props.title ?? rec.id);
+    const date = rec.props.date ? ` on ${rec.props.date}` : "";
+    card =
+      `Meeting ${title} (${rec.id})${date}.` +
+      clause("Attendees", by.get("ATTENDED")) +
+      clause("Discusses tickets", by.get("DISCUSSES")) +
+      clause("Components", by.get("ABOUT")) +
+      clause("References", by.get("REFERENCES"));
+  } else if (rec.label === "PullRequest") {
+    const num = String(rec.props.number ?? "");
+    const title = String(rec.props.title ?? "");
+    const desc = rec.props.description ? ` ${String(rec.props.description)}` : "";
+    card =
+      `Pull request #${num} ${title} (${rec.id}).${desc}` +
+      clause("Author", by.get("AUTHORED_BY")) +
+      clause("Reviewers", by.get("REVIEWED_BY")) +
+      clause("Fixes tickets", by.get("FIXES")) +
+      clause("Components", by.get("ABOUT")) +
+      clause("References", by.get("REFERENCES"));
   } else {
     // Ticket
     const key = String(rec.props.key ?? rec.id);
@@ -142,8 +163,8 @@ export function buildChunks(rec: RawRecord): ChunkSpec[] {
 
   chunks.push({ id: chunkId(rec.id, 0), index: 0, content: card.trim(), source: rec.kind });
 
-  // Document bodies split into further chunks (paragraphs).
-  if (rec.label === "Document" && rec.body) {
+  // Document + Meeting bodies split into further chunks (paragraphs / utterances).
+  if ((rec.label === "Document" || rec.label === "Meeting") && rec.body) {
     const paras = rec.body
       .split(/\r?\n\s*\r?\n/)
       .map((p) => p.replace(/\s+/g, " ").trim())

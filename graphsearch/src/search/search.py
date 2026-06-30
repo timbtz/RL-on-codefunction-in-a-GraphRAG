@@ -40,9 +40,15 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 # These four are the headline levers the optimizer mutates (read from ``cfg``
 # with these defaults). Keep them obvious and bounded.
-DEFAULT_SEED_LIMIT: int = 20          # # of fulltext seed chunks kept (LIMIT on seed query)
-DEFAULT_MAX_DEPTH: int = 2            # ALWAYS-bounded variable-length hop count for the walk
-DEFAULT_NEIGHBOR_LIMIT: int = 25      # max # of owner nodes collected by the bounded walk
+DEFAULT_SEED_LIMIT: int = 3           # # of fulltext seed chunks kept (LIMIT on seed query)
+DEFAULT_MAX_DEPTH: int = 1            # ALWAYS-bounded variable-length hop count for the walk
+DEFAULT_NEIGHBOR_LIMIT: int = 5       # max # of owner nodes collected by the bounded walk
+# CALIBRATION (2026-06-30): the previous loose defaults (seed=20, depth=2, nbr=25)
+# returned ~22 owners — the ENTIRE tiny corpus — for every query, so retrieval was
+# non-selective and graph/ingestion quality could never matter (seed scored 1.0 with
+# zero headroom). These selective defaults bring avg context to ~4-5 owners, so the
+# gold node is reachable ONLY when ingestion built the right edges → the ingestion
+# optimizer now has real, attributable headroom (free-text Qs miss pre-LLM-extractor).
 DEFAULT_MAX_CONTEXT_CHARS: int = 20_000  # hard cap on the returned context string
 
 # Secondary safety bounds (kept conservative; also editable). Every Cypher query
@@ -81,10 +87,14 @@ _STOPWORDS: frozenset[str] = frozenset(
 _CORPUS_EDGE_TYPES: tuple[str, ...] = (
     "AUTHORED_BY", "ABOUT", "REFERENCES", "SENT_BY", "ASSIGNED",
     "REPORTED", "BLOCKS", "REPLY_TO", "MENTIONS",
+    # Teams meetings + GitHub PRs (cross-source chains):
+    "ATTENDED", "DISCUSSES", "REVIEWED_BY", "FIXES",
 )
 
 # Owner labels that bear answer-text + emit a citation token.
-_OWNER_LABELS: tuple[str, ...] = ("Document", "Message", "Ticket")
+_OWNER_LABELS: tuple[str, ...] = (
+    "Document", "Message", "Ticket", "Meeting", "PullRequest",
+)
 
 # Label -> citation prefix. The canonical node ids already carry this prefix
 # (e.g. ``doc:intro``), so the emitted token is ``[doc:intro]`` etc. We still
@@ -93,6 +103,8 @@ _CITATION_PREFIX_BY_LABEL: dict[str, str] = {
     "Document": "doc",
     "Message": "msg",
     "Ticket": "ticket",
+    "Meeting": "meeting",
+    "PullRequest": "pr",
 }
 
 # Lucene query-syntax special characters that must be escaped inside terms so a

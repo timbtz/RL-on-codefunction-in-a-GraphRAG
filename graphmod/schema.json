@@ -4,8 +4,10 @@
     "Component",
     "Document",
     "Entity",
+    "Meeting",
     "Message",
     "Person",
+    "PullRequest",
     "Ticket"
   ],
   "nodeProps": {
@@ -45,12 +47,36 @@
       "title": "string",
       "description": "string?",
       "status": "string?"
+    },
+    "Meeting": {
+      "id": "string",
+      "title": "string",
+      "date": "string?",
+      "project": "string?"
+    },
+    "PullRequest": {
+      "id": "string",
+      "number": "number",
+      "title": "string",
+      "repo": "string?",
+      "state": "string?",
+      "description": "string?"
     }
   },
   "relationships": [
     {
       "type": "ABOUT",
       "from": "Document",
+      "to": "Component"
+    },
+    {
+      "type": "ABOUT",
+      "from": "Meeting",
+      "to": "Component"
+    },
+    {
+      "type": "ABOUT",
+      "from": "PullRequest",
       "to": "Component"
     },
     {
@@ -64,13 +90,33 @@
       "to": "Person"
     },
     {
+      "type": "ATTENDED",
+      "from": "Meeting",
+      "to": "Person"
+    },
+    {
       "type": "AUTHORED_BY",
       "from": "Document",
       "to": "Person"
     },
     {
+      "type": "AUTHORED_BY",
+      "from": "PullRequest",
+      "to": "Person"
+    },
+    {
       "type": "BLOCKS",
       "from": "Ticket",
+      "to": "Ticket"
+    },
+    {
+      "type": "DISCUSSES",
+      "from": "Meeting",
+      "to": "Ticket"
+    },
+    {
+      "type": "FIXES",
+      "from": "PullRequest",
       "to": "Ticket"
     },
     {
@@ -80,7 +126,17 @@
     },
     {
       "type": "HAS_CHUNK",
+      "from": "Meeting",
+      "to": "Chunk"
+    },
+    {
+      "type": "HAS_CHUNK",
       "from": "Message",
+      "to": "Chunk"
+    },
+    {
+      "type": "HAS_CHUNK",
+      "from": "PullRequest",
       "to": "Chunk"
     },
     {
@@ -100,7 +156,17 @@
     },
     {
       "type": "REFERENCES",
+      "from": "Meeting",
+      "to": "Document"
+    },
+    {
+      "type": "REFERENCES",
       "from": "Message",
+      "to": "Document"
+    },
+    {
+      "type": "REFERENCES",
+      "from": "PullRequest",
       "to": "Document"
     },
     {
@@ -116,6 +182,11 @@
     {
       "type": "REPORTED",
       "from": "Ticket",
+      "to": "Person"
+    },
+    {
+      "type": "REVIEWED_BY",
+      "from": "PullRequest",
       "to": "Person"
     },
     {

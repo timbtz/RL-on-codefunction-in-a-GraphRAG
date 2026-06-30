@@ -6,7 +6,7 @@ graphretr-demo/emb_cache.npy
 .agents/
 META/
 Research/
-wiki
+wiki/
 graphsearch/data
 neo4j
 .venv
@@ -23,3 +23,24 @@ __pycache__/
 *.txt
 !requirements.txt
 !**/requirements.txt
+
+# --- Secrets: NEVER commit API keys (OpenRouter / z.ai live in these) ---
+.env
+**/.env
+
+# --- Generated ingestion artifacts (cost meter output) ---
+graphmod/.ingest_cost/
+graphmod/ingest_cost.json
+
+# --- MLflow local store + optimizer run outputs ---
+graphretr-demo/mlflow_cooptimize.db
+graphretr-demo/mlruns_cooptimize_test/
+graphretr-demo/runs/
+
+# --- Scratch test drivers / smoke scripts (this session) ---
+graphretr-demo/m1_repro.py
+graphretr-demo/run_ingest_only.py
+graphretr-demo/run_ingest_only_long.py
+graphretr-demo/run_ingest_only_hr.py
+graphretr-demo/run_ingest_big.py
+graphsearch/smoke_search.py

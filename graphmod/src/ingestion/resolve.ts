@@ -30,11 +30,17 @@ export type RelType =
   | "REPLY_TO"
   | "ASSIGNED"
   | "REPORTED"
-  | "BLOCKS";
+  | "BLOCKS"
+  // --- Teams meeting (Meeting) ---
+  | "ATTENDED"      // Meeting -> Person
+  | "DISCUSSES"     // Meeting -> Ticket (the project ticket talked through in the standup)
+  // --- GitHub (PullRequest) ---
+  | "REVIEWED_BY"   // PullRequest -> Person
+  | "FIXES";        // PullRequest -> Ticket (the PR that resolves the ticket)
 
 /** Owner (root) label for each source kind. */
-export type SourceKind = "doc" | "chat" | "jira";
-export type OwnerLabel = "Document" | "Message" | "Ticket";
+export type SourceKind = "doc" | "chat" | "jira" | "meeting" | "github";
+export type OwnerLabel = "Document" | "Message" | "Ticket" | "Meeting" | "PullRequest";
 
 /** The Neo4j label a structured edge points AT, keyed by relationship type. */
 export const REL_TARGET_LABEL: Record<RelType, string> = {
@@ -42,9 +48,13 @@ export const REL_TARGET_LABEL: Record<RelType, string> = {
   SENT_BY: "Person",
   ASSIGNED: "Person",
   REPORTED: "Person",
+  ATTENDED: "Person",
+  REVIEWED_BY: "Person",
   ABOUT: "Component",
   REFERENCES: "Document",
   BLOCKS: "Ticket",
+  DISCUSSES: "Ticket",
+  FIXES: "Ticket",
   REPLY_TO: "Message",
 };
 
@@ -122,6 +132,20 @@ export function ticketId(key: string): string {
   return k.startsWith("ticket:") ? k : `ticket:${k}`;
 }
 
+/** Teams meeting id, e.g. meetingId("billing","2026-05-06") → "meeting:billing:2026-05-06". */
+export function meetingId(project: string, date: string): string {
+  const p = project.trim();
+  if (p.startsWith("meeting:")) return p;
+  return `meeting:${slug(project)}:${date.trim()}`;
+}
+
+/** GitHub PR id, e.g. prId("billing", 88) → "pr:billing#88". */
+export function prId(repo: string, number: number | string): string {
+  const r = repo.trim();
+  if (r.startsWith("pr:")) return r;
+  return `pr:${slug(repo)}#${number}`;
+}
+
 /** Chunk id from its owner id + 0-based index. */
 export function chunkId(ownerId: string, index: number): string {
   return `${ownerId}#c${index}`;
@@ -138,19 +162,26 @@ export interface ComponentVocab {
   name: string;
 }
 
-/** Known people in the corpus (README: tim, lasse, mara, noah). */
+/** Known people in the corpus. */
 export const KNOWN_PEOPLE: PersonVocab[] = [
   { handle: "tim", name: "Tim" },
   { handle: "lasse", name: "Lasse" },
   { handle: "mara", name: "Mara" },
   { handle: "noah", name: "Noah" },
+  { handle: "priya", name: "Priya" },
+  { handle: "omar", name: "Omar" },
+  { handle: "sara", name: "Sara" },
+  { handle: "jack", name: "Jack" },
 ];
 
-/** Known components (README: auth-redesign, billing, search-index). */
+/** Known components / projects. */
 export const KNOWN_COMPONENTS: ComponentVocab[] = [
   { slug: "auth-redesign", name: "auth-redesign" },
   { slug: "billing", name: "billing" },
   { slug: "search-index", name: "search-index" },
+  { slug: "onboarding", name: "onboarding" },
+  { slug: "infra", name: "infra" },
+  { slug: "data-platform", name: "data-platform" },
 ];
 
 // ---- Gazetteer + resolver ----
