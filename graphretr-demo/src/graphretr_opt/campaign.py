@@ -534,7 +534,7 @@ class Campaign:
                                         per_query_timeout_s=cfg.probe_timeout_s)
             loop = FastLoop(cfg, self.graph, self.sandbox, self.reward, mutator,
                             EditBudget("const", cfg.max_edits), tracker)
-            fails, wins = loop._reflect(rows, cfg.reflect_top)
+            fails, wins, _ = loop._reflect(rows, cfg.reflect_top)
 
             print(f"[stage0] one-shot rewrite ({cfg.mutator_backend}/{cfg.mutator_model}) ...")
             t0 = time.time()

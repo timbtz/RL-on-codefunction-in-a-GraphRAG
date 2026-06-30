@@ -51,6 +51,8 @@ export interface IngestOptions {
   llm?: LlmClient;
   /** Run the post-build invariant check (every root has a card chunk). Default true. */
   validate?: boolean;
+  /** Wipe all nodes/rels before building (candidate isolation on a shared DB). */
+  wipe?: boolean;
 }
 
 export interface IngestReport {
@@ -180,6 +182,14 @@ export async function ingest(
   const resolver = new Resolver(KNOWN_PEOPLE, KNOWN_COMPONENTS);
   const meter = new Meter(opts.hash ?? "seed");
 
+  // 0) Optional wipe — candidate isolation on a shared (Neo4j Community single) DB.
+  //    Each candidate's ingestion must build a fresh graph; MERGE alone would layer
+  //    a new candidate's nodes on top of the previous one. Constraints/indexes are
+  //    not nodes, so they survive (and createSchema is IF NOT EXISTS regardless).
+  if (opts.wipe) {
+    await session.run(`MATCH (n) DETACH DELETE n`);
+  }
+
   // 1) Constraints + fulltext index.
   await createSchema(session);
 
@@ -250,6 +260,7 @@ function parseArgs(argv: string[]): { corpusDir: string; opts: IngestOptions } {
     if (a === "--db") opts.db = argv[++i];
     else if (a === "--hash") opts.hash = argv[++i];
     else if (a === "--llm") opts.llmExtraction = true;
+    else if (a === "--wipe") opts.wipe = true;
     else if (a === "--no-validate") opts.validate = false;
     else positional.push(a);
   }
@@ -266,12 +277,16 @@ async function main(): Promise<void> {
   // Imported lazily so module load (and tests) don't require a live driver.
   const { getSession } = await import("../../examples/session");
   const session = await getSession();
+  let report: IngestReport;
   try {
-    const report = await ingest(session, corpusDir, opts);
-    process.stdout.write(JSON.stringify(report) + "\n");
+    report = await ingest(session, corpusDir, opts);
   } finally {
     await (session as unknown as { close?: () => Promise<void> }).close?.();
   }
+  // Flush the report fully before the caller (the Python reward adapter) reads it.
+  await new Promise<void>((resolve) =>
+    process.stdout.write(JSON.stringify(report) + "\n", () => resolve()),
+  );
 }
 
 // Run as a script (tsx). Any error -> non-zero exit with the message surfaced.
@@ -284,10 +299,16 @@ const isMain = (() => {
 })();
 
 if (isMain) {
-  main().catch((err) => {
-    process.stderr.write(
-      `ingest failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
-    );
-    process.exit(1);
-  });
+  // getSession() (examples/session.ts) creates a neo4j-driver Driver but returns
+  // only the Session, so the driver's connection pool is never closed and keeps
+  // Node's event loop alive — the process would hang forever after printing the
+  // report. Force a clean exit once main() has flushed stdout + closed the session.
+  main()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      process.stderr.write(
+        `ingest failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
+      );
+      process.exit(1);
+    });
 }

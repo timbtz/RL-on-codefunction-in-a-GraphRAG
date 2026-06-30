@@ -302,9 +302,13 @@ class IngestSearchRewardAdapter:
         timeout = (per_query_timeout_s if per_query_timeout_s is not None
                    else self._default_timeout_s)
 
-        # (A) hash ONLY the ingestion .ts overlay -> graph db name.
+        # (A) hash ONLY the ingestion .ts overlay -> cache key. The PHYSICAL Neo4j
+        # database is always cfg.neo4j_database (Community is single-DB): the hash
+        # keys the wipe-and-rebuild cache (loaded-hash marker), it is NOT a real DB
+        # name. (Enterprise multi-db isolation -- a distinct DB per hash -- is the
+        # documented future hook in _ensure_graph.)
         ingest_hash = self._ingest_hash(file_set)
-        graphdb = f"{self._cfg.ingest_db_prefix}{ingest_hash}"
+        graphdb = self._cfg.neo4j_database or "neo4j"
 
         # (A)+(B) ensure the graph for this hash is built+loaded (serialized,
         # cached). Returns (error_or_None, ingest_cost{tokens, usd}).
@@ -447,8 +451,10 @@ class IngestSearchRewardAdapter:
             })
             # ingest.ts relpath under the graphmod cwd (CONTRACT CLI).
             ingest_ts = os.path.join("src", "ingestion", "ingest.ts")
+            # --wipe: candidate isolation on the shared single DB (each build starts
+            # from an empty graph, so a prior candidate's nodes never leak in).
             cmd = ["npx", "tsx", ingest_ts, cfg.corpus_dir_abs,
-                   "--db", graphdb, "--hash", ingest_hash]
+                   "--db", graphdb, "--hash", ingest_hash, "--wipe"]
             try:
                 proc = subprocess.run(
                     cmd, cwd=cfg.graphmod_dir_abs, env=env,
