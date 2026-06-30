@@ -1,231 +1,273 @@
-# EvoRetrieve — pushing a self-improving optimizer from one function to a whole RAG system
+<div align="center">
 
-> **A reflective, LLM-driven code-evolution optimizer applied to retrieval-augmented
-> generation (RAG).** It starts by optimizing a single search function on a public
-> benchmark, and is being extended toward a multi-component system where *ingestion* and
-> *search* are co-optimized. The optimizer rewrites real source code (not a config),
-> scores candidates with a judge-free exam, and prices every candidate in **real USD per
-> query**.
+# EvoRetrieve
 
-<!-- Author note: working title "EvoRetrieve". This README is intentionally vision-first
-     and light on internal mechanics — the internals are research-grade but not yet
-     bulletproof, and they are not the point. The point is the research direction. -->
+### A self-improving optimizer that rewrites the source code of a GraphRAG system — co-evolving **ingestion** and **search**, gated by a judge-free exam and priced in **real USD per query**.
+
+**code-evolution** · **judge-free reward** · **accuracy–cost Pareto** · **ingestion ⊕ search co-design**
+
+</div>
 
 ---
 
-## TL;DR
+## Abstract
 
-A new class of system — **self-improving optimizers** that use an LLM as a *mutation
-operator* over source code — has produced striking results on math and GPU kernels
-([FunSearch](https://www.nature.com/articles/s41586-023-06924-6),
-[AlphaEvolve](https://arxiv.org/abs/2506.13131),
-[KernelEvolve](https://arxiv.org/abs/2512.23236)). These all share one shape: *propose a
-code edit → evaluate it against an oracle → keep it if it wins → repeat.* They have been
-pointed almost exclusively at problems with a cheap, exact oracle and a single objective
-(speed, or a math score).
+Self-improving "code-evolution" optimizers — FunSearch, AlphaEvolve, kernel-evolution
+systems — turn an LLM into a *mutation operator* over source code: **propose an edit →
+evaluate against an oracle → keep it if it wins → repeat.** They have produced striking
+results, but almost exclusively where the oracle is cheap and exact and the objective is a
+single number (a math score, a kernel speedup).
 
-**EvoRetrieve asks how far that same optimizer goes when the target is a real agentic RAG
-system** — where there is no exact oracle, where quality is semantic, and where every
-query costs real money. Two design commitments make the problem tractable:
+**EvoRetrieve asks how far that idea goes when the target is a real, multi-component GraphRAG
+system** — where quality is semantic, the graph must be *built* before it can be searched,
+and every query costs money. The optimizer edits the **actual TypeScript ingestion** that
+builds a Neo4j knowledge graph **and** the **Python search** that traverses it, scores each
+candidate with a **deterministic multiple-choice exam** (no LLM judge to game), meters every
+candidate in **real USD/query**, and selects on the **accuracy–cost Pareto frontier**.
 
-1. **A judge-free exam as the reward.** Quality is measured by deterministic
-   multiple-choice exam accuracy (exact match, no LLM judge to game), with a
-   *closed-book adjustment* that isolates what *retrieval* adds over the model's own
-   parametric knowledge.
-2. **Real USD/query as a first-class objective.** Every candidate is metered in dollars,
-   and selection happens on the **accuracy–cost Pareto frontier**, not on accuracy alone.
-
-The project is structured as a **trajectory**, not a single result:
-
-| Phase | Target | What evolves | Status |
-|---|---|---|---|
-| **1 — single function** | one `search(query, graph)` function over a public KG benchmark (STARK) | one Python function | ✅ working, results below |
-| **2 — whole system** | a real graph-retrieval service + its **ingestion** | multi-file source of a live service | 🚧 in progress — see [Roadmap](#roadmap) |
+> **Headline.** On a hand-built 5-source enterprise corpus (Jira · Confluence · Teams ·
+> GitHub · chat → 219-node graph, 81-question exam), the optimizer lifted a hand-written
+> seed from **0.767 → 0.967 MCQ accuracy** (retrieval-hit 0.73 → 1.00), holdout-confirmed at
+> **0.964** — automatically, by co-evolving the search procedure. On the public **STARK**
+> benchmark (Phase 1) it lifted a seed search function from **recall@20 0.26 → 0.44 / hit@1
+> 0.09 → 0.28** on a disjoint 300-query held-out set, with no measurable overfitting gap.
 
 ---
 
-## Why this is interesting (research framing)
+## 1 · The gap
 
-RAG quality is dominated by the retrieval stage, and the most consequential retrieval
-decisions in a **graph** RAG system are *procedural* — how to seed entities, how far and
-how selectively to traverse, when to spend an LLM call to expand or rerank, when to stop.
-Those decisions live in **code**, not in a hyperparameter.
+RAG quality is dominated by retrieval, and the most consequential retrieval decisions in a
+**graph** RAG system are *procedural* — how to seed entities, how far and how selectively to
+traverse, when to spend an LLM call, when to stop — **and how the graph was built in the
+first place.** Those decisions live in **code**, not in a hyperparameter.
 
-Today's automated RAG optimization mostly searches over **configurations** — it
-recombines modules an engineer already wrote (e.g.
-[AutoRAG](https://arxiv.org/abs/2410.20878); and, *per its public brief*, the ETH Agentic
-Systems Lab's reasoning-agent AutoRAG, which proposes pipeline configs from exam
-diagnoses). Code-evolution optimizers *can* synthesize genuinely new procedures — but
-they've been applied to math and kernels, never to a RAG retrieval node against a live
-graph database, and never with money as an objective.
-
-**EvoRetrieve sits at that intersection** and treats it as an open question rather than a
-solved one:
+Today's automated RAG optimization mostly searches over **configurations**: it recombines
+modules an engineer already wrote ([AutoRAG](https://arxiv.org/abs/2410.20878)). Code-evolution
+optimizers *can* synthesize genuinely new procedures — but they've been pointed at math and
+kernels, never at a RAG node against a live graph, never with money on the objective, and
+**never at the coupling between *ingestion* and *search*** — the case where changing how the
+graph is built reshapes what search must do, so the two have to be optimized *together*.
 
 ```mermaid
 flowchart LR
-    subgraph EU["edit unit →"]
+    subgraph EU["edit unit"]
       direction TB
       C["config / knobs"]
       P["prompt text"]
-      K["source code"]
+      K["<b>source code</b>"]
     end
-    subgraph RW["reward →"]
+    subgraph RW["reward"]
       direction TB
       M["proxy metric"]
       J["LLM judge"]
-      X["judge-free exam<br/>+ real $ cost"]
+      X["<b>judge-free exam<br/>+ real $ cost</b>"]
     end
-    K -.->|"this project"| X
+    K -.->|"EvoRetrieve"| X
     style K fill:#0b6,stroke:#063,color:#fff
     style X fill:#0b6,stroke:#063,color:#fff
 ```
 
-The lineage we build on (config search → prompt optimization → code evolution) is
-surveyed in [related work](#related-work). The contribution we *claim* is deliberately
-narrow and defensible: **applying reflective code evolution to a RAG retrieval system,
-gated by a judge-free exam, with measured USD/query as a Pareto axis** — and then asking
-how the optimizer behaves as the target grows from one function to a coupled
-ingestion+search system.
+**The claim is deliberately narrow and defensible:** reflective code-evolution applied to a
+GraphRAG system, gated by a judge-free exam, with measured USD/query as a Pareto axis — and a
+characterization of how the optimizer behaves as the target grows from **one function** to a
+**coupled ingestion + search system.**
 
 ---
 
-## How the optimizer works
+## 2 · System architecture
 
-One optimization step is a closed reflective loop. The candidate is **real source code**;
-the LLM is the mutation operator; reflection on *why queries failed* is the feedback
-signal (a "textual gradient" in the [GEPA](https://arxiv.org/abs/2507.19457) sense).
+A *candidate* is an overlay of two real source files — the **ingestion** (`extract.ts`, builds
+the graph) and the **search** (`search.py`, traverses it). Scoring is a **two-phase rollout**:
+rebuild the graph, then search it over the exam. Ingestion is cached by the hash of the `.ts`
+files, so a search-only edit reuses the graph and only an ingestion edit triggers a rebuild.
 
 ```mermaid
-flowchart TD
-    A["Candidate program<br/>(real source code)"] --> B["Rollout<br/>run over a batch of exam queries<br/>in subprocess isolation"]
-    B --> C["Reward<br/>judge-free MCQ accuracy<br/>+ closed-book adjustment<br/>+ metered USD / latency"]
-    C --> D["Reflect<br/>attribute each miss:<br/>retrieval-reach vs ranking failure"]
-    D --> E["Propose<br/>LLM emits multi-file<br/>SEARCH/REPLACE edits<br/>(edit budget + self-repair)"]
-    E --> F{"Gate<br/>cost-aware:<br/>accuracy vs USD<br/>+ Pareto dominance"}
-    F -->|accept| G["Pareto pool<br/>of incumbents"]
-    F -->|reject| G
-    G --> A
-    G -.->|"after the run"| H["Held-out bake-off<br/>re-score survivors on a<br/>disjoint set → export best"]
+flowchart TB
+    subgraph SRC["① Multi-source corpus (mock enterprise)"]
+      direction LR
+      J["Jira<br/>tickets"]:::s
+      CF["Confluence<br/>docs"]:::s
+      TM["Teams<br/>standups"]:::s
+      GH["GitHub<br/>PRs"]:::s
+      CH["chat"]:::s
+    end
+
+    subgraph ING["② Ingestion — TypeScript, optimizer-editable"]
+      direction TB
+      LD["loaders → RawRecord IR"] --> RES["resolve: canonical ids + gazetteer"]
+      RES --> EX["extract: MERGE edges + chunk cards<br/><i>+ optional metered LLM extractor</i>"]
+    end
+
+    subgraph KG["③ Neo4j knowledge graph"]
+      G["Person · Component · Ticket · Document<br/>Message · Meeting · PullRequest · Chunk<br/>+ corpus_ft fulltext index"]
+    end
+
+    subgraph SR["④ Search — Python, optimizer-editable"]
+      SS["fulltext seed → bounded multi-hop walk<br/>→ context + [citations]"]
+    end
+
+    subgraph EXAM["⑤ Judge-free exam"]
+      Q["MCQ: exact-match answer<br/>+ retrieval-hit (gold node in context)<br/>+ closed-book adjustment"]
+    end
+
+    SRC --> ING --> KG --> SR --> EXAM
+
+    subgraph OPT["⑥ Optimizer loop (per candidate = extract.ts ⊕ search.py)"]
+      direction TB
+      RF["reflect: attribute each miss →<br/>NOT_INGESTED · ORPHANED · UNREACHABLE · RANKING"]
+      MUT["propose: GLM/LLM emits SEARCH/REPLACE edits<br/>(edit budget + self-repair)"]
+      GATE["gate: cost-aware Pareto<br/>(accuracy vs amortized USD/query)"]
+      RF --> MUT --> GATE --> RF
+    end
+
+    EXAM -->|"score + USD + attribution"| OPT
+    GATE -.->|"accepted ingestion edit → re-ingest"| ING
+    GATE -.->|"accepted search edit → reuse graph"| SR
+
+    classDef s fill:#eef,stroke:#88a;
 ```
 
-The pieces, briefly (details in the per-package READMEs):
-
-- **Candidate = code.** A candidate is an *overlay* of edited source files on an
-  immutable base, materialized and run in a throwaway subprocess against a live graph
-  database — so the optimizer edits the actual service, not a sandboxed toy.
-- **Reward = judge-free exam.** Deterministic exact-match MCQ accuracy; a closed-book
-  adjustment (`open-book correct − closed-book correct`) credits *retrieval*, not the
-  model's memorized knowledge.
-- **Feedback = reflection.** Each missed query is bucketed (did retrieval *reach* the
-  answer at all, vs did it reach but *rank* it too low?) and fed back as text the next
-  edit can act on.
-- **Selection = cost-aware Pareto.** Acceptance blends accuracy against measured USD, and
-  a Pareto pool keeps a *frontier* of incumbents rather than a single winner. A complexity
-  / crash filter stops the optimizer from "winning" with degenerate programs.
-- **Honesty = leakage control.** Per-run scores use small rotating gate sets; the number
-  worth trusting is the **once-only held-out bake-off** on a disjoint 300-query set.
+**Where each part runs.** Ingestion is a one-shot `tsx ingest.ts` subprocess that `--wipe`s and
+rebuilds an **isolated Neo4j database** from the candidate's `extract.ts`. Search is the
+candidate's `search.py`, imported fresh per candidate (throwaway module) and run in-process
+against that graph — the same answerer/USD path as production scoring. The winner is exported
+and can be lifted straight back into the live retrieval service.
 
 ---
 
-## Results
+## 3 · How one optimization step works
+
+```mermaid
+flowchart LR
+    A["Candidate<br/>extract.ts ⊕ search.py"] --> B["Rollout<br/>tsx ingest → Neo4j<br/>→ python search → exam"]
+    B --> C["Reward<br/>MCQ acc + retrieval-hit<br/>+ metered USD/query"]
+    C --> D["Reflect<br/>read-only graph probe:<br/>was the gold ingested?<br/>reachable? ranked?"]
+    D --> E["Propose<br/>LLM SEARCH/REPLACE edits<br/>to ingestion and/or search"]
+    E --> F{"Gate<br/>cost-aware Pareto"}
+    F -->|accept| G["Pareto pool"]
+    F -->|reject + self-repair text| G
+    G --> A
+    G -.->|"once, after the run"| H["Held-out bake-off<br/>→ export champion"]
+```
+
+- **Candidate = code.** Real source, run against a live graph DB in subprocess isolation — not a sandboxed toy.
+- **Reward = judge-free exam.** Deterministic exact-match MCQ accuracy; a closed-book adjustment credits what *retrieval* adds over the model's parametric knowledge.
+- **Feedback = graph-aware attribution.** Every miss is probed read-only and bucketed
+  `NOT_INGESTED` (gold node absent) / `ORPHANED` (present, no path from seeds) / `UNREACHABLE`
+  (path exists, search didn't reach it) / `RANKING` — so the optimizer is told *which side to fix.*
+- **Selection = cost-aware Pareto.** Acceptance blends accuracy against amortized USD/query
+  (`ingest_usd / N + search_usd`); a Pareto pool keeps a frontier, not one winner; a
+  complexity/crash filter stops degenerate "wins."
+- **Honesty = leakage control.** Per-run scores use small rotating gate sets; the trustworthy
+  number is the once-only held-out bake-off.
+
+---
+
+## 4 · Results
+
+### Phase 2 — co-optimizing ingestion + search on a multi-source graph
+
+A hand-built mock enterprise corpus spanning **five sources** — Jira, Confluence, Teams
+standups, GitHub PRs, and chat — ingested into a **219-node / 485-edge** Neo4j graph with
+genuine cross-system chains (*a problem in a Jira ticket → its solution decided in a Teams
+standup → implemented in a GitHub PR → documented in Confluence*). The exam is **81 judge-free
+MCQs** (30 structured · 12 multi-hop · 7 cross-source · 20 free-text · 12 multi-gold/aggregation).
+
+| Program | MCQ accuracy | retrieval-hit | ingest USD | total USD/query |
+|---|---|---|---|---|
+| Hand-written seed (zero-LLM ingestion) | 0.767 | 0.733 | $0.000 | ~$0.0002 |
+| **Co-optimized (best, exported)** | **0.967** | **1.000** | **$0.000** | ~$0.0002 |
+| | **+0.20** | **+0.27** | — | held-out **0.964** |
+
+The optimizer reached 0.967 by **co-evolving the search procedure** (widening the fulltext
+seed, adding exact-id seeding, deepening the bounded walk) — selected over paying for LLM
+extraction because the cost-aware gate preferred the **$0** fix (see §5).
+
+```mermaid
+xychart-beta
+    title "Seed → optimized (MCQ accuracy)"
+    x-axis ["Phase 1 · STARK recall@20", "Phase 1 · STARK hit@1", "Phase 2 · co-optimize MCQ"]
+    y-axis "score" 0 --> 1
+    bar [0.26, 0.09, 0.767]
+    bar [0.44, 0.28, 0.967]
+```
+<sub>left bar = hand-written seed · right bar = optimized & held-out-confirmed</sub>
 
 ### Phase 1 — optimizing a single search function on STARK
 
-Public benchmark: [STARK](https://stark.stanford.edu/) (semi-structured retrieval over a
-knowledge graph). Metric: node-containment recall / hit / MRR via the STARK evaluator.
-The optimizer rewrites one `search(query, graph)` function, starting from a simple
-hand-written seed.
+Public benchmark: [STARK](https://stark.stanford.edu/) (semi-structured retrieval over a KG).
+The optimizer rewrites one `search(query, graph)` function from a simple seed.
 
 | Program | recall@20 | hit@1 | MRR | Evaluated on |
 |---|---|---|---|---|
 | Hand-written seed | 0.26 | 0.09 | 0.15 | gate set |
-| **Optimized (best, exported)** | **0.44** | **0.28** | **0.35** | **300-query held-out** |
-| | ×1.7 | ×3.1 | ×2.3 | |
-
-The optimized program is the export from the 300-query held-out bake-off
-(`runs/run7/select_holdout.json`); its held-out score matches its in-run score
-(`export_changed = false`), i.e. **no overfitting gap** on this run. Absolute numbers on
-STARK-prime are modest — the benchmark is hard and old — so the headline is the
-**optimization gain from automated code evolution on a public set**, together with the
-fact that every candidate was simultaneously **priced in dollars**.
-
-> **Honesty notes (these matter for a research reader).**
-> - Per-run gate sets are small (≤30 queries) and therefore noisy; only the 300-query
->   held-out number above should be read as a result.
-> - This Phase-1 result was produced by the optimizer's original *single-function*
->   architecture. The Phase-2 *whole-service* extension is **not yet** producing a
->   non-regressing number — see Roadmap.
-
-### Phase 2 — whole-system (ingestion + search) co-optimization
-
-🚧 **In progress — to be updated.** The extension lets the optimizer edit a real
-multi-file retrieval service and, ultimately, the **ingestion** that builds the graph it
-searches — the interesting case where an ingestion change reshapes what search must do,
-so the two have to be optimized *together*. The current multi-file target is being
-stabilized (it regressed relative to Phase 1 — an instructive failure mode: code bloat
-and crash-rate spirals under a weak complexity gate). **Results will be filled in here
-once this is stable.**
-
-<!-- UPDATE WHEN COMPLETE: replace this block with the Phase-2 results table
-     (seed service vs co-optimized service: accuracy, USD/query, ingestion cost). -->
+| **Optimized (exported)** | **0.44** | **0.28** | **0.35** | **300-query held-out** |
+| | ×1.7 | ×3.1 | ×2.3 | no overfitting gap |
 
 ---
 
-## Roadmap
+## 5 · Analysis — *why* it behaves this way
 
-- [ ] **Phase 2: stabilize the whole-service target** — fix the bloat/crash spiral (tighter
-      complexity gate, stronger self-repair) so multi-file evolution matches or beats the
-      single-function result. *(in progress)*
-- [ ] **Co-optimize ingestion + search** — let the optimizer change how the graph is built,
-      and measure the coupling between ingestion choices and downstream retrieval.
-      ([`graphmod/`](graphmod) is the typed Neo4j ingestion framework this will plug into —
-      today it is a clean schema/ingestion layer, *not yet* under optimizer control.)
-- [ ] **Controlled science** — a like-for-like configuration-search baseline over the same
-      knobs, a second corpus + held-out exam split, the cost-weight frontier sweep, and the
-      reflection-on/off ablation. *(This is the empirical study, not yet run.)*
+- **Attribution localizes the fix.** On the multi-source corpus the seed's misses probed as
+  `UNREACHABLE` (the answer nodes — PRs, docs — sat just beyond the selective retriever). The
+  optimizer followed that signal and edited **search**, not ingestion — the right lever.
+- **Coupling is real and observable.** On a smaller corpus where *search was frozen*, the same
+  misses forced an **ingestion** fix instead: the optimizer added graph-transitivity edges so
+  the answer became reachable within the bounded walk (0.93 → 0.97). Flip which file is editable
+  and the optimizer co-adapts the other side — the central claim, shown both ways.
+- **The cost-aware gate refuses to overspend.** We deliberately planted questions whose answer
+  link lives *only* in prose (no rule-based edge — Cypher-proven). The optimizer **still never
+  turned on the LLM extractor**: widening fulltext search retrieved the answer chunk directly,
+  for **$0**, so paying tokens for extraction was correctly rejected. *A negative result that is
+  itself a finding:* with fulltext seeding + an LLM answerer, making expensive ingestion the
+  **only** way to win is a genuine reward-design problem — exactly the kind of honesty the gate
+  is there to enforce.
 
 ---
 
-## Repository layout
+## 6 · Limitations & reproducibility
+
+- **Corpus design is the binding constraint.** Whether the optimizer has *attributable headroom*
+  — and whether an expensive lever is ever *necessary* — is decided by the exam, not the engine.
+  Making LLM extraction strictly required (vs. substitutable by search) is open work.
+- **Mutator reliability.** The GLM (z.ai) mutation backend intermittently emits unparseable
+  edits (~30–40% of steps), which burns budget; this is a fixable parsing/format issue, not a
+  loop defect.
+- **Reproducibility.** Two-phase rollout against a live Neo4j DB; MLflow tracking; per-run
+  rotating gate sets + a once-only held-out bake-off; complexity/crash filters. Runs land under
+  `graphretr-demo/runs/<name>/` with full lineage (`lineage.jsonl`), per-step overlays, the
+  reflection transcripts, and the exported champion.
+
+---
+
+## 7 · Repository layout
 
 | Path | What it is |
 |---|---|
-| [`graphretr-demo/`](graphretr-demo) | The optimizer core + Phase-1 STARK environment, runs, MLflow. See its README. |
-| [`starksearch/`](starksearch) | Phase-2 whole-service STARK target (subprocess, multi-file). |
-| [`graphsearch/`](graphsearch) | A second end-to-end agentic-retrieval target (graph QA). |
-| [`graphmod/`](graphmod) | Typed, validated **Neo4j ingestion / schema framework** (TypeScript). Standalone today; the future ingestion-optimization target. |
-| [`Orchestration/`](Orchestration) | Design docs / run plans. |
+| [`graphretr-demo/`](graphretr-demo) | The optimizer core — loop, Pareto pool, cost-aware gate, two-phase reward adapter, attribution probe, MLflow. |
+| [`graphmod/`](graphmod) | Typed, validated **Neo4j ingestion framework** (TypeScript). The optimizer-editable `extract.ts` + schema modules for all 7 node types. |
+| [`graphsearch/`](graphsearch) | The graph-QA target: editable `search.py`, the mock 5-source corpus, and the judge-free MCQ exam. |
+| [`starksearch/`](starksearch) | Phase-1/2 STARK target (public benchmark). |
+| [`Orchestration/`](Orchestration) | Design docs / co-optimize contract + runbooks. |
 
-**Stack.** Python 3.11 (optimizer + targets), TypeScript/Node (`graphmod`). LLM backends
-via OpenRouter (retrieval-time models + embeddings) and a configurable mutation backend.
-Experiment tracking via MLflow.
-
-> ⚠️ **Repo hygiene is mid-cleanup** — a tracked `.venv/`, caches, and a run graveyard are
-> being removed (see the working cleanup plan). If you are reviewing this, the files worth
-> reading are `graphretr-demo/src/graphretr_opt/optimizer/` (the loop, pool, and gate) and
-> the per-package READMEs.
+**Stack.** Python 3.11 (optimizer + search), TypeScript/Node (`graphmod` ingestion), Neo4j 5
+(Enterprise, multi-db isolation). Answerer + in-search LLM via OpenRouter; the code-mutation
+backend is GLM via z.ai (or the Claude CLI). Experiment tracking via MLflow.
 
 ---
 
-## Related work
+## 8 · Related work
 
-The systems EvoRetrieve builds on and positions against:
+- **Code evolution** — [FunSearch](https://www.nature.com/articles/s41586-023-06924-6),
+  [AlphaEvolve](https://arxiv.org/abs/2506.13131), OpenEvolve,
+  [KernelEvolve](https://arxiv.org/abs/2512.23236). *Evolve code; target math / kernels, not RAG, not $.*
+- **Reflective prompt / pipeline optimization** — [GEPA](https://arxiv.org/abs/2507.19457),
+  [DSPy / MIPROv2](https://arxiv.org/abs/2406.11695), OPRO, TextGrad, Reflexion. *Optimize prompts, not procedural code.*
+- **Agent / skill design** — [Voyager](https://arxiv.org/abs/2305.16291),
+  [ADAS](https://arxiv.org/abs/2408.08435). *Closest in spirit to evolving a whole system.*
+- **AutoML for RAG** — [AutoRAG](https://arxiv.org/abs/2410.20878) and the exam-generation
+  evaluation of [Guinet et al.](https://arxiv.org/abs/2405.13622) that judge-free RAG scoring builds on. *Search over configurations of pre-built modules.*
 
-- **Code evolution** — [FunSearch](https://www.nature.com/articles/s41586-023-06924-6)
-  (Nature 2024), [AlphaEvolve](https://arxiv.org/abs/2506.13131) (DeepMind 2025),
-  OpenEvolve, and [KernelEvolve](https://arxiv.org/abs/2512.23236) (Meta, kernel
-  optimization). *Evolve source code; target math / kernels / speedup, not RAG, not $.*
-- **Reflective prompt / pipeline optimization** —
-  [GEPA](https://arxiv.org/abs/2507.19457) (reflective Pareto prompt evolution),
-  [DSPy / MIPROv2](https://arxiv.org/abs/2406.11695), OPRO, TextGrad, Reflexion. *Optimize
-  prompts / compound-AI parameters, not procedural retrieval code.*
-- **Agent / skill design** — [Voyager](https://arxiv.org/abs/2305.16291) (lifelong skill
-  library as code) and [ADAS](https://arxiv.org/abs/2408.08435) (automated design of
-  agentic systems). *Closest in spirit to evolving a whole system.*
-- **AutoML for RAG** — [AutoRAG](https://arxiv.org/abs/2410.20878) (greedy module/grid
-  search) and the exam-generation evaluation of
-  [Guinet et al.](https://arxiv.org/abs/2405.13622) (ICML 2024) that judge-free RAG scoring
-  builds on. *Search over configurations of pre-built modules.*
-
-A fuller, vendor-neutral survey of this landscape lives in the companion optimizer wiki.
+The open research framing — matching the *search topology* to the design space's factor
+structure (structured niching, branch-and-converge, staged credit assignment) — is mapped in
+`Orchestration/` and the companion optimizer wiki.

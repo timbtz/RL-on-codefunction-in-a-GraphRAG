@@ -607,8 +607,10 @@ class IngestSearchRewardAdapter:
         for _i, idx, row in missed:
             try:
                 _q, _q_id, gold = self._sub.example(idx)
-                gold_id = gold.get("source") or ""
-                if not gold_id:
+                src = gold.get("source") or ""
+                # multi-gold (list) -> probe the first gold id (diagnostic only).
+                gold_id = (src[0] if isinstance(src, (list, tuple)) and src else src)
+                if not gold_id or not isinstance(gold_id, str):
                     continue  # no gold node id -> nothing to probe
                 diag = (target.diagnostics or {}).get(row.get("query"), {})
                 retrieved_ids = diag.get("retrieved_ids")

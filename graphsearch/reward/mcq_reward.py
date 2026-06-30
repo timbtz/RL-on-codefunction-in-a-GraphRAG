@@ -153,11 +153,19 @@ class McqReward:
 
     @staticmethod
     def _retrieval_hit(source, context):
-        """Cheap, judge-free: does the gold source/expected doc appear in the
-        returned context? Substring match (case-insensitive). Secondary axis."""
+        """Cheap, judge-free: do the gold source(s) appear in the returned
+        context? Substring match (case-insensitive). Secondary axis.
+
+        `source` is either a single gold node id (str) OR a list/tuple of ids
+        for a MULTI-EVIDENCE question -- then ALL of them must be retrieved for
+        a hit (a set-answer needs the whole supporting set in context, not one
+        node). Backward compatible: a plain string behaves exactly as before."""
         if not source or not context:
             return False
-        return source.lower() in context.lower()
+        ctx = context.lower()
+        ids = [source] if isinstance(source, str) else list(source)
+        ids = [str(s).lower() for s in ids if s]
+        return bool(ids) and all(s in ctx for s in ids)
 
     def score(self, target, file_set, idxs, substrate, timeout_s,
               return_rows=False):
