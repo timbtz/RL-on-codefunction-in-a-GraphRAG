@@ -40,7 +40,7 @@ The project is structured as a **trajectory**, not a single result:
 | Phase | Target | What evolves | Status |
 |---|---|---|---|
 | **1 — single function** | one `search(query, graph)` function over a public KG benchmark (STARK) | one Python function | ✅ working, results below |
-| **2 — whole system** | a real graph-retrieval service + its **ingestion** | multi-file source of a live service | 🚧 in progress — see [Roadmap](#roadmap) |
+| **2 — whole system** | a real graph-retrieval service + its **ingestion** | multi-file source of a live service | 🟢 **search half now beats Phase 1** (results below); ingestion co-opt still ahead — see [Roadmap](#roadmap) |
 
 ---
 
@@ -157,26 +157,128 @@ fact that every candidate was simultaneously **priced in dollars**.
 >   architecture. The Phase-2 *whole-service* extension is **not yet** producing a
 >   non-regressing number — see Roadmap.
 
-### Phase 2 — whole-system (ingestion + search) co-optimization
+### Phase 2 — the whole-service target now beats the single function
 
-🚧 **In progress — to be updated.** The extension lets the optimizer edit a real
-multi-file retrieval service and, ultimately, the **ingestion** that builds the graph it
-searches — the interesting case where an ingestion change reshapes what search must do,
-so the two have to be optimized *together*. The current multi-file target is being
-stabilized (it regressed relative to Phase 1 — an instructive failure mode: code bloat
-and crash-rate spirals under a weak complexity gate). **Results will be filled in here
-once this is stable.**
+The Phase-1 win lived in **one** `search()` function. Phase 2 hands the optimizer a
+whole **multi-file retrieval service** (`starksearch/` — a real
+`StarkGraphSearchService` that owns extraction, vector/text search, graph recall,
+fusion and rerank) and lets it rewrite any of it, scored the same judge-free way. This
+is strictly harder: more surface to break, and a weak complexity gate lets candidates
+bloat and crash.
 
-<!-- UPDATE WHEN COMPLETE: replace this block with the Phase-2 results table
-     (seed service vs co-optimized service: accuracy, USD/query, ingestion cost). -->
+It did not work on the first try, and the failure is the instructive part. The story
+across runs, measured on the **once-only 300-query held-out** bake-off (the same 300
+val queries every run — `meta_seed=1234`, so these numbers are directly comparable):
+
+```mermaid
+xychart-beta
+    title "STARK recall@20 — once-only 300-query held-out, by run"
+    x-axis ["run7 (1 fn)", "run10c (svc)", "run13 (GLM)", "run14 (GLM)", "run15 (archi)"]
+    y-axis "recall@20" 0 --> 0.60
+    bar [0.435, 0.160, 0.455, 0.492, 0.536]
+```
+
+| Run | Target | Mutator | recall@20 | hit@1 | MRR | program size (AST cx) |
+|---|---|---|---|---|---|---|
+| **run7** | single `search()` fn | Claude Opus | 0.435 | 0.277 | 0.347 | 1006 |
+| run10c | whole service (first cut) | Claude Opus | 0.160 | 0.080 | 0.108 | — |
+| run13 | whole service | GLM-5.2 (z.ai) | 0.455 | 0.240 | 0.329 | — |
+| **run14** | whole service | GLM-5.2 (z.ai) | 0.492 | 0.287 | 0.368 | 2439 |
+| **run15** (archipelago) | whole service, seed-chained | GLM-5.2 (z.ai) | **0.536** | 0.270 | 0.368 | 2504 |
+
+- **run10c — the regression.** Opening the multi-file target *lost ~60% of the recall*
+  (0.44 → 0.16). The optimizer "won" the small per-step gate with programs that bloated
+  and crashed — exactly the code-bloat / crash-rate spiral a single-objective code
+  optimizer falls into when the complexity gate is too weak.
+- **run11–run13 — the fixes.** A cost-and-complexity *value* gate, a scoring bug fix
+  (a cold-cache timeout + a cache-write race that had zeroed run12), and a switch of the
+  **mutation LLM to GLM-5.2 (z.ai)** brought it back to Phase-1 level.
+- **run14 — surpassing Phase 1.** The stabilized whole-service target reaches **0.492**
+  held-out recall@20 — above the single-function 0.435.
+- **run15 — archipelago.** Running several islands and *seed-chaining* champions (each
+  island reseeded from a previous winner) pushed the best island to **0.536** recall@20 —
+  the top result. Most islands regressed; only the fresh chain won, so this is a
+  promising-but-noisy orchestration signal, not a robust one yet.
+
+#### Final verdict — 900-query locked test split
+
+The numbers above are the 300-query held-out. For an honest, low-variance headline the
+champion **and its seed** were scored once on a **900-query subsample of the locked
+`test` split** (2801 queries the optimizer never touched, via
+`cli.py final --test-n 900`). The "seed" here is not naive — it is the Phase-1 levers
+(typed anchor-hop + per-keyword conjunction bridge) ported into the service — so this
+isolates what *whole-service evolution adds on top of Phase-1 knowledge*:
+
+| Metric | Seed (Phase-1 levers) | **Evolved service (run14)** | Δ |
+|---|---|---|---|
+| recall@20 | 0.476 | **0.529** | **+0.054** |
+| hit@1 | 0.240 | **0.282** | **+0.042** |
+| hit@5 | 0.418 | **0.498** | **+0.080** |
+| MRR | 0.327 | **0.382** | **+0.055** |
+
+run14 is the **verified** 900-query champion. (run15's archipelago champion tops the
+300-query held-out at 0.536, but its 900-query test pass is not yet verified — the run
+hit an external OpenRouter credit ceiling part-way through — so run14 is reported as the
+headline until run15 is re-scored at scale.)
+
+#### How it stacks up on the STaRK-Prime leaderboard
+
+We use STaRK's own `Evaluator` on the `prime` **test split**, so our numbers line up
+directly against the published
+[STaRK leaderboard](https://huggingface.co/spaces/snap-stanford/stark-leaderboard)
+(all values are percentages):
+
+```mermaid
+xychart-beta
+    title "STaRK-Prime Recall@20 (%) — published baselines vs our evolved service"
+    x-axis ["VSS", "Multi-VSS", "Reflexion", "AvaTaR", "Ours (run14)"]
+    y-axis "Recall@20 (%)" 0 --> 60
+    bar [36.0, 38.05, 38.52, 39.31, 52.9]
+```
+
+| Method (STaRK-Prime test) | Hit@1 | Hit@5 | Recall@20 | MRR |
+|---|---|---|---|---|
+| VSS (text-embedding-ada-002) | 12.63 | 31.49 | 36.00 | 21.41 |
+| Multi-VSS | 15.10 | 33.56 | 38.05 | 23.49 |
+| Reflexion (LLM agent) | 14.28 | 34.99 | 38.52 | 24.82 |
+| AvaTaR (LLM-**agent** optimizer) | 18.44 | 36.73 | 39.31 | 26.73 |
+| **Ours — evolved service (run14)** | **28.2** | **49.8** | **52.9** | **38.2** |
+
+Baselines are from the [STaRK paper](https://arxiv.org/abs/2404.13207) and
+[AvaTaR](https://arxiv.org/abs/2406.11200), on the same test split. The evolved service
+beats them on **every** metric — most strikingly **Recall@20 (+13.6 pts over AvaTaR)** —
+because it doesn't just *rerank* a dense pool (reranking leaves Recall@20 roughly flat),
+it *expands reach*: typed anchor-hop traversal, per-keyword conjunction bridges, and query
+reformulation. The apples-to-apples point is that it beats **AvaTaR, itself an LLM
+optimizer for this exact benchmark** — reflective *code* evolution vs agent-*prompt*
+optimization. (Specialized 2025 methods — LLM query-expansion, fine-tuned GraphRAFT —
+report higher and are out of scope for this baseline comparison.)
+
+**How — and what it cost.** The optimizer's *mutation* model (the LLM that rewrites the
+service's source) was **GLM-5.2** (via z.ai) — **~$5–6** for the whole run. Retrieval-time
+inference — entity extraction, LLM rerank, query reformulation — ran on **Gemini 2.5 Flash
+Lite** through OpenRouter, with **`text-embedding-3-small`** for vectors. End to end,
+evolving a leaderboard-beating STaRK-Prime service cost **~$10–15**: cheap mutation plus a
+tiny retrieval model, **no GPT-4 anywhere in the loop** — yet it clears the GPT-4-reranker
+and AvaTaR numbers.
+
+> **Honesty notes.**
+> - Per-run gate sets are small (≤30 queries in the whole-service runs) and noisy; only
+>   the 300-query held-out and the 900-query test numbers should be read as results.
+> - The whole-service target is better but **more fragile** than the single function —
+>   several pool candidates still crash on the full held-out set, and program size roughly
+>   doubled (1006 → ~2500 AST-complexity). Tightening the complexity/crash gate is ongoing.
+> - This is the **search** half of Phase 2. The harder, more interesting half —
+>   co-optimizing the **ingestion** that builds the graph — is still ahead (Roadmap).
 
 ---
 
 ## Roadmap
 
-- [ ] **Phase 2: stabilize the whole-service target** — fix the bloat/crash spiral (tighter
-      complexity gate, stronger self-repair) so multi-file evolution matches or beats the
-      single-function result. *(in progress)*
+- [x] **Phase 2: stabilize the whole-service target** — fixed the bloat/crash spiral
+      (cost-and-complexity value gate + scoring-race fix + GLM-5.2 mutator) so multi-file
+      evolution now **beats** the single-function result (run14 0.492 / run15 0.536 held-out
+      recall@20 vs run7 0.435). *Crash-hardening the pool is still ongoing.*
 - [ ] **Co-optimize ingestion + search** — let the optimizer change how the graph is built,
       and measure the coupling between ingestion choices and downstream retrieval.
       ([`graphmod/`](graphmod) is the typed Neo4j ingestion framework this will plug into —

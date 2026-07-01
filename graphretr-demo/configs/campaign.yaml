@@ -133,7 +133,7 @@ frontier_model: google/gemini-2.5-flash-lite     # G.pick_frontier
 # Light calls (extract/reformulate/frontier) can drop to a faster/cheaper Chinese
 # model -- copy the exact current slug from openrouter.ai/models, e.g.
 # z-ai/glm-4.5-air or a small qwen3 -- once verified (kept on deepseek to avoid 404).
-openai_budget_usd: 15.0         # raised 10->15 (run13): ledger cumulative at ~$5.66, so the GLM run + now-cold 300-query bake-off (select_timeout_s=60) won't die mid-run on the cap
+openai_budget_usd: 30.0         # raised 15->30 (2026-07-01): final 900-query test-split eval of run14_glm best vs seed; cumulative ledger was at $15.00 (prior cap), need headroom for the honest held-out bake-off
 
 # strategy arm (layer 3): which seed family this campaign descends. run-6 arm:
 # reasoning_first_v6 (run-5 rerank + G.reformulate). For the run6a loop-only
