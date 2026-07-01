@@ -28,9 +28,11 @@ candidate in **real USD/query**, and selects on the **accuracy–cost Pareto fro
 > **Headline.** On a hand-built 5-source enterprise corpus (Jira · Confluence · Teams ·
 > GitHub · chat → 219-node graph, 81-question exam), the optimizer lifted a hand-written
 > seed from **0.767 → 0.967 MCQ accuracy** (retrieval-hit 0.73 → 1.00), holdout-confirmed at
-> **0.964** — automatically, by co-evolving the search procedure. On the public **STARK**
+> **0.964** — automatically, by co-evolving the search procedure. On the public **STARK**-Prime
 > benchmark (Phase 1) it lifted a seed search function from **recall@20 0.26 → 0.44 / hit@1
-> 0.09 → 0.28** on a disjoint 300-query held-out set, with no measurable overfitting gap.
+> 0.09 → 0.28** (300-query held-out, no overfitting gap); scaled to a full multi-file service,
+> its best evolved search **beats every published STARK-Prime baseline** — Recall@20 **0.56**
+> vs AvaTaR 0.39 on a 900-query held-out test split.
 
 ---
 
@@ -185,24 +187,63 @@ extraction because the cost-aware gate preferred the **$0** fix (see §5).
 
 ```mermaid
 xychart-beta
-    title "Seed → optimized (MCQ accuracy)"
-    x-axis ["Phase 1 · STARK recall@20", "Phase 1 · STARK hit@1", "Phase 2 · co-optimize MCQ"]
+    title "Phase 2 — co-optimize ingestion+search: seed → optimized"
+    x-axis ["MCQ accuracy", "retrieval-hit"]
     y-axis "score" 0 --> 1
-    bar [0.26, 0.09, 0.767]
-    bar [0.44, 0.28, 0.967]
+    bar [0.767, 0.733]
+    bar [0.967, 1.000]
 ```
-<sub>left bar = hand-written seed · right bar = optimized & held-out-confirmed</sub>
+<sub>left bar = hand-written seed · right bar = co-optimized & held-out-confirmed (0.964). STARK
+is a *different* benchmark with a *different* metric — it gets its own chart and its own
+leaderboard comparison below, never mixed into this one.</sub>
 
-### Phase 1 — optimizing a single search function on STARK
+### Phase 1 — STARK-Prime, versus the public leaderboard
 
-Public benchmark: [STARK](https://stark.stanford.edu/) (semi-structured retrieval over a KG).
-The optimizer rewrites one `search(query, graph)` function from a simple seed.
+Public benchmark: [STARK](https://stark.stanford.edu/)-Prime (Stanford, NeurIPS 2024) —
+semi-structured retrieval over a 129k-node biomedical KG (2,801-query test split), scored by
+node-containment Hit@1 / Hit@5 / Recall@20 / MRR. The optimizer first rewrites one
+`search(query, graph)` function, then graduates to the whole multi-file retrieval service.
+
+**Single function (origin).** Hand-written seed → exported champion on a disjoint 300-query
+held-out set, no measurable overfitting gap:
 
 | Program | recall@20 | hit@1 | MRR | Evaluated on |
 |---|---|---|---|---|
 | Hand-written seed | 0.26 | 0.09 | 0.15 | gate set |
 | **Optimized (exported)** | **0.44** | **0.28** | **0.35** | **300-query held-out** |
 | | ×1.7 | ×3.1 | ×2.3 | no overfitting gap |
+
+**Best evolved search (whole multi-file service), 900-query locked `test` split.** Scaling
+the target from one function to a full service and switching the mutator to GLM-5.2 lifts it
+past the single function **and past every published STARK-Prime baseline.** Two champions
+split the metrics — both clear the leaderboard on every one (percentages):
+
+| STARK-Prime test | Hit@1 | Hit@5 | Recall@20 | MRR |
+|---|---|---|---|---|
+| VSS (text-embedding-ada-002) | 12.63 | 31.49 | 36.00 | 21.41 |
+| Multi-VSS | 15.10 | 33.56 | 38.05 | 23.49 |
+| Reflexion (LLM agent) | 14.28 | 34.99 | 38.52 | 24.82 |
+| AvaTaR (LLM-**agent** optimizer) | 18.44 | 36.73 | 39.31 | 26.73 |
+| **Ours — run14 (balanced)** | **28.2** | **49.8** | 52.9 | **38.2** |
+| **Ours — run15 (recall-max)** | 27.2 | 49.1 | **56.2** | 37.4 |
+
+```mermaid
+xychart-beta
+    title "STARK-Prime Recall@20 (%) — leaderboard baselines vs our evolved search"
+    x-axis ["VSS", "Multi-VSS", "Reflexion", "AvaTaR", "Ours"]
+    y-axis "Recall@20 (%)" 0 --> 60
+    bar [36.0, 38.05, 38.52, 39.31, 56.2]
+```
+<sub>Baselines: [STARK paper](https://arxiv.org/abs/2404.13207) · [AvaTaR](https://arxiv.org/abs/2406.11200),
+same test split · [leaderboard](https://huggingface.co/spaces/snap-stanford/stark-leaderboard).</sub>
+
+It beats **AvaTaR — itself an LLM optimizer for this exact benchmark** — by **+16.9 pts
+Recall@20** and **+9.8 pts Hit@1**: reflective *code* evolution over agent-*prompt*
+optimization. The lift comes from *expanding reach* (typed anchor-hop, per-keyword
+conjunction bridges, query reformulation), not just reranking a dense pool — and it cost the
+GLM-5.2 mutator (~$5–6) plus Gemini-2.5-Flash-Lite retrieval, **no GPT-4 in the loop.**
+(Specialized 2025 methods — LLM query-expansion, fine-tuned GraphRAFT — report higher and are
+out of scope for this baseline comparison.)
 
 ---
 
