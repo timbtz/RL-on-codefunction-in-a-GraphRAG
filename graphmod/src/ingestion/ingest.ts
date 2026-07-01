@@ -182,12 +182,43 @@ async function validateBuild(
  * Build the corpus graph in `session` (idempotent). Returns an IngestReport.
  * Throws on any schema/validation error — the CLI maps that to exit code 1.
  */
+/**
+ * Controlled vocabulary = the hardcoded KNOWN_* defaults MERGED with optional
+ * `people.json` / `components.json` in the corpus dir. This lets a large generated
+ * corpus declare its own people/components (every structured edge endpoint must
+ * exist in the vocab, since mergeEdge only connects existing nodes). Absent files
+ * → defaults only (backward compatible).
+ */
+function loadVocab(corpusDir: string): {
+  people: typeof KNOWN_PEOPLE;
+  components: typeof KNOWN_COMPONENTS;
+} {
+  const people = [...KNOWN_PEOPLE];
+  const components = [...KNOWN_COMPONENTS];
+  const pf = join(corpusDir, "people.json");
+  if (existsSync(pf)) {
+    const seen = new Set(people.map((p) => p.handle));
+    for (const p of JSON.parse(readFileSync(pf, "utf8")) as typeof KNOWN_PEOPLE) {
+      if (p?.handle && !seen.has(p.handle)) { people.push(p); seen.add(p.handle); }
+    }
+  }
+  const cf = join(corpusDir, "components.json");
+  if (existsSync(cf)) {
+    const seen = new Set(components.map((c) => c.slug));
+    for (const c of JSON.parse(readFileSync(cf, "utf8")) as typeof KNOWN_COMPONENTS) {
+      if (c?.slug && !seen.has(c.slug)) { components.push(c); seen.add(c.slug); }
+    }
+  }
+  return { people, components };
+}
+
 export async function ingest(
   session: GraphSession,
   corpusDir: string,
   opts: IngestOptions = {},
 ): Promise<IngestReport> {
-  const resolver = new Resolver(KNOWN_PEOPLE, KNOWN_COMPONENTS);
+  const { people: VOCAB_PEOPLE, components: VOCAB_COMPONENTS } = loadVocab(corpusDir);
+  const resolver = new Resolver(VOCAB_PEOPLE, VOCAB_COMPONENTS);
   const meter = new Meter(opts.hash ?? "seed");
 
   // 0) Optional wipe — candidate isolation on a shared (Neo4j Community single) DB.
@@ -209,7 +240,7 @@ export async function ingest(
   //    props before any edge/forward-reference is written). Phase B: chunks,
   //    HAS_CHUNK, structured edges, MENTIONS.
   await session.executeWrite(async (tx) => {
-    await ensureVocab(tx, KNOWN_PEOPLE, KNOWN_COMPONENTS);
+    await ensureVocab(tx, VOCAB_PEOPLE, VOCAB_COMPONENTS);
     for (const rec of records) await writeRoot(tx, rec);
     for (const rec of records) await writeChunksAndStructure(tx, rec, resolver);
   });
