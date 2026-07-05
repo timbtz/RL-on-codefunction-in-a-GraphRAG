@@ -79,7 +79,7 @@ export interface RawRecord {
   refs: RawRef[];
   /** prose scanned for regex/gazetteer MENTIONS (and the card body for docs) */
   text: string;
-  /** doc body split into chunks 1..n; undefined for chat/jira (single card) */
+  /** doc body / ticket description split into chunks 1..n; undefined for chat (single card) */
   body?: string;
 }
 

@@ -5,9 +5,11 @@ import { EntityModule } from "../Entity/entity.module";
 import { ChunkModule } from "../Chunk/chunk.module";
 
 // Markdown document source. Mirrors TextFileModule (Document -> HAS_CHUNK ->
-// Chunk -> MENTIONS -> Entity) and adds the cross-source edges the corpus needs:
+// Chunk -> MENTIONS -> ...) and adds the cross-source edges the corpus needs:
 // AUTHORED_BY (-> Person, the "owner" path) and ABOUT (-> Component), plus
-// REFERENCES between documents (wikilinks / URLs).
+// REFERENCES between documents (wikilinks / URLs). This module declares the
+// MENTIONS Chunk->Person triplet of the per-module MENTIONS fan-out (see
+// chunk.module.ts).
 export const DocModule = defineModule({
     schema: {
         name: "DocModule",
@@ -40,7 +42,7 @@ export const DocModule = defineModule({
             },
             MENTIONS: {
                 from: "Chunk",
-                to: "Entity",
+                to: "Person",
                 cardinality: "0..n",
             },
             AUTHORED_BY: {

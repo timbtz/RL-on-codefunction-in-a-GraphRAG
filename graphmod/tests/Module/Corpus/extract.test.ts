@@ -72,6 +72,7 @@ test("buildChunks: ticket card NAMES related entities (Assignee + component)", (
   const t: JiraTicket = {
     key: "PROJ-12",
     title: "Migrate auth to OAuth 2.1",
+    description: "Replace session cookies with OAuth 2.1 access + refresh tokens.",
     status: "In Progress",
     assignee: "tim",
     reporter: "lasse",
@@ -90,6 +91,19 @@ test("buildChunks: ticket card NAMES related entities (Assignee + component)", (
   assert.match(card.content, /Assignee Tim/);
   assert.match(card.content, /Reporter Lasse/);
   assert.match(card.content, /auth-redesign/);
+  // The description does NOT displace the card; it becomes body chunks 1..n
+  // (fulltext-searchable prose, mirroring Document bodies).
+  assert.doesNotMatch(card.content, /session cookies/);
+  assert.equal(chunks.length, 2);
+  assert.equal(chunks[1].id, "ticket:PROJ-12#c1");
+  assert.equal(chunks[1].index, 1);
+  assert.match(chunks[1].content, /Replace session cookies with OAuth 2\.1/);
+});
+
+test("buildChunks: ticket without a description stays a single card chunk", () => {
+  const t: JiraTicket = { key: "PROJ-1", title: "No prose" };
+  const rec = loadJiraTicket(t, new Resolver(KNOWN_PEOPLE, KNOWN_COMPONENTS));
+  assert.equal(buildChunks(rec).length, 1);
 });
 
 // ---- MERGE shapes via fake tx ----
@@ -169,6 +183,26 @@ test("extractWithLLM: resolves entities/relations and the Meter records tokens/u
   assert.equal(meter.usd, 0.0042);
   assert.equal(meter.calls.length, 1);
   assert.equal(meter.calls[0].field, "chat.msg:eng:9");
+});
+
+test("extractWithLLM: unknown Person/Component-typed names downgrade to generic Entity", async () => {
+  const resolver = new Resolver(KNOWN_PEOPLE, KNOWN_COMPONENTS);
+  const llm: LlmClient = {
+    async complete(): Promise<LlmResult> {
+      return {
+        json: {
+          entities: [{ name: "Zoe", type: "Person" }], // NOT in the gazetteer
+          relations: [],
+        },
+        tokens: 1,
+        usd: 0,
+      };
+    },
+  };
+  const ex = await extractWithLLM("Zoe joined.", SCHEMA, llm, new Meter("t"), "f", resolver);
+  // A Person label with an entity:<slug> id would be skipped by
+  // writeLlmExtraction (silently dropping its relations) — downgrade instead.
+  assert.deepEqual(ex.entities, [{ id: "entity:zoe", label: "Entity", name: "Zoe" }]);
 });
 
 test("LLM lever is a NO-OP when the flag is off: client untouched, Meter stays 0", async () => {

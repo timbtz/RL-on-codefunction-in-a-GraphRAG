@@ -148,6 +148,8 @@ test("loadJiraTicket: assignee/reporter/components/references/blocks resolve to 
   assert.equal(rec.props.key, "PROJ-19");
   assert.equal(rec.props.title, "Auth incident hardening");
   assert.equal(rec.props.status, "Open");
+  // Description feeds body chunks 1..n (fulltext-visible), not just a node prop.
+  assert.equal(rec.body, "Harden the token cache eviction policy.");
 
   assert.deepEqual(refsFor(rec, "ASSIGNED"), [
     { rel: "ASSIGNED", targetId: "person:tim", name: "Tim" },

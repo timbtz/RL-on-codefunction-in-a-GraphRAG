@@ -62,6 +62,9 @@ export function loadJiraTicket(t: JiraTicket, resolver: Resolver): RawRecord {
     props,
     refs,
     text: `${t.title}\n${t.description ?? ""}`,
+    // Description prose becomes body chunks 1..n (mirrors Document bodies), so
+    // it is visible to the corpus_ft fulltext index, not just a node prop.
+    body: t.description,
   };
 }
 

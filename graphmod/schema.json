@@ -1,0 +1,142 @@
+{
+  "labels": [
+    "Chunk",
+    "Component",
+    "Document",
+    "Entity",
+    "Message",
+    "Person",
+    "Ticket"
+  ],
+  "nodeProps": {
+    "Person": {
+      "id": "string",
+      "name": "string",
+      "info": "string?"
+    },
+    "Component": {
+      "id": "string",
+      "name": "string",
+      "info": "string?"
+    },
+    "Entity": {
+      "id": "string",
+      "name": "string?"
+    },
+    "Chunk": {
+      "id": "string",
+      "content": "string",
+      "source": "string?"
+    },
+    "Document": {
+      "id": "string",
+      "title": "string",
+      "path": "string?"
+    },
+    "Message": {
+      "id": "string",
+      "text": "string",
+      "ts": "string?",
+      "channel": "string?"
+    },
+    "Ticket": {
+      "id": "string",
+      "key": "string",
+      "title": "string",
+      "description": "string?",
+      "status": "string?"
+    }
+  },
+  "relationships": [
+    {
+      "type": "ABOUT",
+      "from": "Document",
+      "to": "Component"
+    },
+    {
+      "type": "ABOUT",
+      "from": "Ticket",
+      "to": "Component"
+    },
+    {
+      "type": "ASSIGNED",
+      "from": "Ticket",
+      "to": "Person"
+    },
+    {
+      "type": "AUTHORED_BY",
+      "from": "Document",
+      "to": "Person"
+    },
+    {
+      "type": "BLOCKS",
+      "from": "Ticket",
+      "to": "Ticket"
+    },
+    {
+      "type": "HAS_CHUNK",
+      "from": "Document",
+      "to": "Chunk"
+    },
+    {
+      "type": "HAS_CHUNK",
+      "from": "Message",
+      "to": "Chunk"
+    },
+    {
+      "type": "HAS_CHUNK",
+      "from": "Ticket",
+      "to": "Chunk"
+    },
+    {
+      "type": "MENTIONS",
+      "from": "Chunk",
+      "to": "Component"
+    },
+    {
+      "type": "MENTIONS",
+      "from": "Chunk",
+      "to": "Entity"
+    },
+    {
+      "type": "MENTIONS",
+      "from": "Chunk",
+      "to": "Person"
+    },
+    {
+      "type": "MENTIONS",
+      "from": "Chunk",
+      "to": "Ticket"
+    },
+    {
+      "type": "REFERENCES",
+      "from": "Document",
+      "to": "Document"
+    },
+    {
+      "type": "REFERENCES",
+      "from": "Message",
+      "to": "Document"
+    },
+    {
+      "type": "REFERENCES",
+      "from": "Ticket",
+      "to": "Document"
+    },
+    {
+      "type": "REPLY_TO",
+      "from": "Message",
+      "to": "Message"
+    },
+    {
+      "type": "REPORTED",
+      "from": "Ticket",
+      "to": "Person"
+    },
+    {
+      "type": "SENT_BY",
+      "from": "Message",
+      "to": "Person"
+    }
+  ]
+}

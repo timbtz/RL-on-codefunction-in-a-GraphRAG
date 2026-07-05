@@ -6,11 +6,12 @@ import { ChunkModule } from "../Chunk/chunk.module";
 import { DocModule } from "../Doc/doc.module";
 
 // Chat message source. Structured fields give SENT_BY (-> Person) and REFERENCES
-// (-> Document); regex/gazetteer over the message text gives MENTIONS
-// (Chunk -> Entity); thread structure gives REPLY_TO. The implicit relations
-// buried in free-text message bodies (e.g. "(tim)-[:REVIEWED]->(doc)") are
-// exactly what rule-based extraction CANNOT recover — the seam the LLM lever
-// fills in M4.
+// (-> Document); regex/gazetteer over the message text gives MENTIONS; thread
+// structure gives REPLY_TO. The implicit relations buried in free-text message
+// bodies (e.g. "(tim)-[:REVIEWED]->(doc)") are exactly what rule-based
+// extraction CANNOT recover — the seam the LLM lever fills in M4. This module
+// declares the MENTIONS Chunk->Component triplet of the per-module MENTIONS
+// fan-out (see chunk.module.ts).
 export const MessageModule = defineModule({
     schema: {
         name: "MessageModule",
@@ -30,7 +31,8 @@ export const MessageModule = defineModule({
                 properties: {
                     id: "string",
                     text: "string",
-                    ts: "datetime?",
+                    // ISO-8601 string as stored by the chat loader (not a Neo4j temporal)
+                    ts: "string?",
                     channel: "string?",
                 },
             },
@@ -50,7 +52,7 @@ export const MessageModule = defineModule({
             },
             MENTIONS: {
                 from: "Chunk",
-                to: "Entity",
+                to: "Component",
                 cardinality: "0..n",
             },
             REFERENCES: {
