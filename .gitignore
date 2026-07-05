@@ -9,7 +9,11 @@ Research/
 wiki
 graphsearch/data
 neo4j
+# Virtual envs — any .venv* variant (.venv, .venv-lint, .venv-test, …)
+.venv*/
 .venv
+# Runtime ingest-cost artifacts
+.ingest_cost/
 
 # Python bytecode / caches
 __pycache__/
