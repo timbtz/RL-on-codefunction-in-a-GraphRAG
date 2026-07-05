@@ -138,19 +138,25 @@ export interface ComponentVocab {
   name: string;
 }
 
-/** Known people in the corpus (README: tim, lasse, mara, noah). */
+/** Known people in the corpus (tim, lasse, mara, noah + calibration additions). */
 export const KNOWN_PEOPLE: PersonVocab[] = [
   { handle: "tim", name: "Tim" },
   { handle: "lasse", name: "Lasse" },
   { handle: "mara", name: "Mara" },
   { handle: "noah", name: "Noah" },
+  { handle: "priya", name: "Priya" },
+  { handle: "jonas", name: "Jonas" },
+  { handle: "elif", name: "Elif" },
 ];
 
-/** Known components (README: auth-redesign, billing, search-index). */
+/** Known components (auth-redesign, billing, search-index + calibration additions). */
 export const KNOWN_COMPONENTS: ComponentVocab[] = [
   { slug: "auth-redesign", name: "auth-redesign" },
   { slug: "billing", name: "billing" },
   { slug: "search-index", name: "search-index" },
+  { slug: "deploy-pipeline", name: "deploy-pipeline" },
+  { slug: "rate-limiter", name: "rate-limiter" },
+  { slug: "notifications", name: "notifications" },
 ];
 
 // ---- Gazetteer + resolver ----
