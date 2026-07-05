@@ -1,6 +1,7 @@
 // ============================================================
 // person.service.ts — Domain service for the Person module
 // ============================================================
+import * as crypto from "node:crypto"; // Node 18: no global WebCrypto — needed for crypto.randomUUID()
 //
 // Graph shape:
 //

@@ -1,6 +1,7 @@
 // ============================================================
 // Meeting.service.ts — Domain service for the Meeting module
 // ============================================================
+import * as crypto from "node:crypto"; // Node 18: no global WebCrypto — needed for crypto.randomUUID()
 //
 // Graph shape (MeetingModule):
 //

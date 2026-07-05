@@ -26,7 +26,7 @@
     "example": "tsx -r dotenv/config examples/usage.ts",
     "visualize": "tsx visualization/cli.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test -r dotenv/config \"tests/Module/**/*.test.ts\"",
+    "test": "tsx --test --test-concurrency=1 -r dotenv/config $(find tests/Module -name '*.test.ts')",
     "test:reset": "tsx --test -r dotenv/config tests/reset.test.ts"
   },
   "devDependencies": {
