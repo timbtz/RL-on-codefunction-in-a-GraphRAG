@@ -7,12 +7,14 @@ and nothing else), so swapping it in is a one-line wiring change in
 ``campaign.boot_search``. What differs is a TWO-PHASE rollout hidden behind that
 seam (see ``Orchestration/Plans/cooptimize-CONTRACT.md``):
 
-  (A) HASH + CACHE -- hash ONLY the ingestion ``.ts`` overlay file(s); the graph
-      database name is ``f"{cfg.ingest_db_prefix}{ingest_hash}"``. Neo4j Community
-      is SINGLE-DB, so caching is wipe-and-rebuild of the default database keyed by
-      a "currently-loaded hash" marker; a search-only edit (same .ts) reuses the
-      built graph. Ingestion is SERIALIZED (an in-process lock + a cross-process
-      file lock) so concurrent candidates never clobber the shared DB.
+  (A) HASH + CACHE -- hash the ingestion ``.ts`` overlay file(s) (+ the
+      ``ingest_llm_extraction`` flag). Neo4j Community is SINGLE-DB, so ALL
+      candidates share the default ``neo4j`` database: caching is wipe-and-rebuild
+      keyed by an on-disk "currently-loaded hash" marker; a search-only edit
+      (same .ts) reuses the built graph. Ingestion is SERIALIZED (an in-process
+      lock + an EXCLUSIVE cross-process file lock) and the search phase holds the
+      same file lock SHARED, so concurrent candidates never wipe the shared DB
+      out from under a running search.
   (B) INGEST -- materialize the ``extract.ts`` overlay into the graphmod tree and
       subprocess ``npx tsx ... ingest.ts``. A nonzero exit / timeout / tsx build
       error -> a CRASHED MetricVector and (with return_rows) rows whose ``error``
@@ -39,6 +41,7 @@ holds the two editable files at ``cfg.ingest_editable_files`` relpaths
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import importlib.util
 import json
@@ -142,9 +145,9 @@ class _IngestSearchTarget:
     """``run(file_set, queries, timeout_s) -> {query: SearchResult}`` -- the SAME
     contract ``McqReward`` consumes (see ``env/search_target.SearchTarget`` and
     ``FakeSearchTarget``). It imports the candidate ``search.py`` from the overlay
-    via importlib, constructs a Neo4j graph scoped to the built ``graph_<hash>``
-    database, runs ``SearchService`` over each query, and shapes the result into
-    the context/cost/error triple the reward reads.
+    via importlib, constructs a Neo4j graph over the shared single database, runs
+    ``SearchService`` over each query, and shapes the result into the
+    context/cost/error triple the reward reads.
 
     Per-query diagnostics (``seed-ish retrieved ids``) are stashed on
     ``self.diagnostics[query]`` so the adapter's attribution probe can tell a
@@ -188,9 +191,9 @@ class _IngestSearchTarget:
 
     # -- Neo4j graph (deferred import; no DB at module import time) -------- #
     def _build_graph(self):
-        """Construct a ``langchain_neo4j.Neo4jGraph`` scoped to the candidate's
-        ``graph_<hash>`` database, wrapped in the counting proxy. Imported lazily
-        so this module loads without langchain_neo4j installed."""
+        """Construct a ``langchain_neo4j.Neo4jGraph`` over the shared single
+        database, wrapped in the counting proxy. Imported lazily so this module
+        loads without langchain_neo4j installed."""
         from langchain_neo4j import Neo4jGraph  # deferred: needs the dep + a DB
         cfg = self._cfg
         graph = Neo4jGraph(
@@ -204,7 +207,8 @@ class _IngestSearchTarget:
     def run(self, file_set, queries, timeout_s: float) -> dict:
         """Run every query through the candidate ``SearchService`` against the
         built graph. A build/import failure errors ALL queries (scored as misses,
-        never fatal); a per-query crash errors just that query."""
+        never fatal); a per-query crash OR ``timeout_s`` overrun errors just that
+        query (a hung bolt query must never block the loop forever)."""
         queries = list(queries)
         # A build/import failure dooms every query but must not crash the loop.
         try:
@@ -217,12 +221,17 @@ class _IngestSearchTarget:
             return {q: SearchResult(context="", cost=CostMeter(), error=msg)
                     for q in queries}
 
+        # Per-query timeout via a single worker thread: the future's .result()
+        # deadline turns a hung search into an error row. After a timeout the
+        # worker is abandoned (pool swapped) so the next query starts fresh.
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        deadline = float(timeout_s) if timeout_s else None
         out: dict = {}
         for q in queries:
             graph.db_queries = 0
             t0 = time.time()
             try:
-                res = service.search(q)
+                res = pool.submit(service.search, q).result(timeout=deadline)
                 ctx = getattr(res, "context", "") or ""
                 citations = getattr(res, "citations", []) or []
                 usd = float(getattr(res, "usd", 0.0) or 0.0)
@@ -241,12 +250,21 @@ class _IngestSearchTarget:
                     llm_calls=1 if usd > 0.0 else 0,
                 )
                 out[q] = SearchResult(context=ctx, cost=cost, error=None)
+            except concurrent.futures.TimeoutError:
+                pool.shutdown(wait=False)   # abandon the hung worker
+                pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                out[q] = SearchResult(
+                    context="",
+                    cost=CostMeter(db_queries=graph.db_queries,
+                                   latency_s=time.time() - t0),
+                    error=f"search timeout after {deadline}s")
             except Exception as e:  # noqa: BLE001 - per-query crash -> a miss
                 out[q] = SearchResult(
                     context="",
                     cost=CostMeter(db_queries=graph.db_queries,
                                    latency_s=time.time() - t0),
                     error=f"{type(e).__name__}: {e}")
+        pool.shutdown(wait=False)
         return out
 
     def _service_cfg(self, file_set) -> dict:
@@ -280,9 +298,10 @@ class IngestSearchRewardAdapter:
         self._cfg = cfg
         self._default_timeout_s = float(default_timeout_s)
         self._ingest_timeout_s = float(ingest_timeout_s)
-        # In-process "currently-loaded hash" marker (the single shared DB holds at
-        # most one graph at a time). The on-disk marker (runs/) survives restarts.
-        self._loaded_hash: Optional[str] = None
+        # On-disk "currently-loaded hash" marker (the single shared DB holds at
+        # most one graph at a time); lives in runs/ so it survives restarts and
+        # is shared across worker processes. ALWAYS read under the file lock --
+        # an in-process copy could go stale the moment another process ingests.
         self._marker_path = os.path.join(
             getattr(cfg, "runs_dir", os.path.join(cfg.root, "runs")),
             "ingest_loaded.json")
@@ -302,14 +321,17 @@ class IngestSearchRewardAdapter:
         timeout = (per_query_timeout_s if per_query_timeout_s is not None
                    else self._default_timeout_s)
 
-        # (A) hash ONLY the ingestion .ts overlay -> graph db name.
+        # (A) hash the ingestion .ts overlay (+ the --llm flag). Community is
+        # single-db: everyone targets the default database, keyed by the marker.
         ingest_hash = self._ingest_hash(file_set)
-        graphdb = f"{self._cfg.ingest_db_prefix}{ingest_hash}"
+        graphdb = self._graphdb()
 
         # (A)+(B) ensure the graph for this hash is built+loaded (serialized,
-        # cached). Returns (error_or_None, ingest_cost{tokens, usd}).
-        ingest_err, ingest_cost = self._ensure_graph(
-            file_set, ingest_hash, graphdb)
+        # cached). Returns (error_or_None, ingest_cost{tokens, usd}, shared_lock);
+        # on success the SHARED file lock is HELD so no concurrent candidate can
+        # wipe/rebuild the DB until our search phase is done.
+        ingest_err, ingest_cost, shared_lock = self._ensure_graph(
+            file_set, ingest_hash)
 
         if ingest_err is not None:
             # A bad ingestion edit (tsx build error / nonzero exit / timeout):
@@ -319,25 +341,29 @@ class IngestSearchRewardAdapter:
                 return mv
             return mv, self._crashed_rows(idxs, ingest_err)
 
-        # (C) search + score: delegate to McqReward (identical answerer/usd path).
-        target = _IngestSearchTarget(
-            graphdb, self._cfg, self._search_relpath())
-        mv, mcq_rows = self._mcq.score(
-            target, file_set, idxs, self._sub, timeout, return_rows=True)
+        try:
+            # (C) search + score: delegate to McqReward (identical answerer/usd
+            # path).
+            target = _IngestSearchTarget(
+                graphdb, self._cfg, self._search_relpath())
+            mv, mcq_rows = self._mcq.score(
+                target, file_set, idxs, self._sub, timeout, return_rows=True)
 
-        # (D) cost axes: amortized total_usd_per_query is then automatic.
-        mv.ingest_usd = float(ingest_cost.get("usd", 0.0))
-        mv.ingest_tokens = int(ingest_cost.get("tokens", 0))
-        mv.n_queries = len(idxs)
-        mv.sanitize()
+            # (D) cost axes: amortized total_usd_per_query is then automatic.
+            mv.ingest_usd = float(ingest_cost.get("usd", 0.0))
+            mv.ingest_tokens = int(ingest_cost.get("tokens", 0))
+            mv.n_queries = len(idxs)
+            mv.sanitize()
 
-        if not return_rows:
-            return mv
+            if not return_rows:
+                return mv
 
-        rows = [_reflect_row(r) for r in mcq_rows]
-        # (E) attribution for missed queries (read-only graph probe).
-        self._attribute(rows, idxs, graphdb, target)
-        return mv, rows
+            rows = [_reflect_row(r) for r in mcq_rows]
+            # (E) attribution for missed queries (read-only graph probe).
+            self._attribute(rows, idxs, graphdb, target)
+            return mv, rows
+        finally:
+            shared_lock.release()
 
     # ================================================================== #
     # (A) ingest hash                                                     #
@@ -357,10 +383,18 @@ class IngestSearchRewardAdapter:
         # Fall back to the contract default if mis-configured.
         return "graphsearch/src/search/search.py"
 
+    def _graphdb(self) -> str:
+        """The ONE database every candidate targets (ingest env, search graph,
+        inspector). Neo4j Community cannot CREATE DATABASE, so per-candidate
+        ``graph_<hash>`` names are off the table -- isolation is wipe-and-rebuild
+        of this default DB, keyed by the loaded-hash marker."""
+        return getattr(self._cfg, "neo4j_database", "neo4j") or "neo4j"
+
     def _ingest_hash(self, file_set) -> str:
         """12-hex content hash over ONLY the ingestion ``.ts`` overlay file(s),
-        sorted by relpath (order-independent). Search-only edits -> same hash ->
-        cache hit -> no re-ingest."""
+        sorted by relpath (order-independent), plus the ``ingest_llm_extraction``
+        flag (toggling --llm must invalidate the cached graph). Search-only edits
+        -> same hash -> cache hit -> no re-ingest."""
         h = hashlib.sha256()
         for rel in sorted(self._ingest_files()):
             content = file_set.overlay.get(rel, "")
@@ -368,56 +402,87 @@ class IngestSearchRewardAdapter:
             h.update(b"\0")
             h.update(content.encode())
             h.update(b"\0")
+        if getattr(self._cfg, "ingest_llm_extraction", False):
+            h.update(b"--llm\0")
         return h.hexdigest()[:12]
 
     # ================================================================== #
     # (A)+(B) build/cache the graph (serialized single-flight)            #
     # ================================================================== #
-    def _ensure_graph(self, file_set, ingest_hash, graphdb):
+    def _ensure_graph(self, file_set, ingest_hash):
         """Ensure the graph for ``ingest_hash`` is the one loaded in the shared
-        single DB. Cache hit (loaded_hash == ingest_hash) -> skip ingest, return
-        the cached cost. Else SERIALIZE (in-process lock + cross-process file
-        lock) and re-ingest: wipe + ``tsx ingest.ts`` (ingest.ts itself drops &
-        recreates the constraints + ``corpus_ft`` index per the CONTRACT).
+        single DB. Cache hit (disk marker == ingest_hash) -> skip ingest. Else
+        SERIALIZE (in-process lock + EXCLUSIVE cross-process file lock) and
+        re-ingest: wipe the DB (constraints + ``corpus_ft`` survive -- ingest.ts
+        creates them IF NOT EXISTS) + ``tsx ingest.ts`` + write the marker.
 
-        Returns ``(error_or_None, cost{tokens, usd})``. ``error`` is a non-empty
-        string (the tsx stderr / failure reason) when ingestion failed.
+        Returns ``(error_or_None, cost{tokens, usd}, shared_lock)``. On success
+        the SHARED file lock is HELD (the caller releases it after the search
+        phase), so concurrent same-hash searches run in parallel while a
+        different-hash candidate's exclusive wipe+rebuild waits. On error no
+        lock is held (``shared_lock`` is None). The marker is ONLY
+        trusted when read under the file lock -- never from an in-process copy.
 
-        FUTURE (Neo4j Enterprise multi-db isolation): instead of wipe-and-rebuild
-        of the default DB keyed by a loaded-hash marker, create a DISTINCT database
-        named ``graphdb`` per candidate and pass ``NEO4J_DB=graphdb`` -- then
-        concurrent candidates never contend and the cache is just "does the db
-        exist". The single-flight lock below becomes unnecessary. Hook left here.
+        FUTURE (Neo4j Enterprise multi-db isolation): create a DISTINCT database
+        per candidate (``graph_<hash>``) and pass ``NEO4J_DB`` -- then concurrent
+        candidates never contend and the cache is just "does the db exist". The
+        wipe + lock protocol below becomes unnecessary. Hook left here.
         """
-        # Fast path: in-process cache hit (no lock needed for a pure read of an
-        # int-sized attribute; the cost re-read is cheap + idempotent).
-        if self._loaded_hash == ingest_hash:
-            return None, self._read_cost(ingest_hash)
+        while True:
+            # Fast path: take the lock SHARED and re-read the DISK marker (a
+            # sibling process may have swapped the graph at any point).
+            shared = _FileLock(self._lock_path, shared=True).acquire()
+            if self._disk_loaded_hash() == ingest_hash:
+                return None, self._read_cost(ingest_hash), shared
+            # flock cannot upgrade in place (a second EX fd would self-deadlock
+            # against our own SH fd), so fully release before going exclusive.
+            shared.release()
 
-        with _INGEST_LOCK:                       # in-process single-flight
-            file_lock = _FileLock(self._lock_path)
-            with file_lock:                      # cross-process single-flight
-                # Re-check under the lock: another thread/candidate may have just
-                # built this exact hash while we waited.
-                if self._loaded_hash == ingest_hash or \
-                        self._disk_loaded_hash() == ingest_hash:
-                    self._loaded_hash = ingest_hash
-                    return None, self._read_cost(ingest_hash)
+            with _INGEST_LOCK:                   # in-process single-flight
+                with _FileLock(self._lock_path):  # cross-process EXCLUSIVE
+                    # Re-check under the lock: another candidate may have just
+                    # built this exact hash while we waited.
+                    if self._disk_loaded_hash() != ingest_hash:
+                        err = self._wipe_db() or self._run_ingest(
+                            file_set, ingest_hash)
+                        if err is not None:
+                            # leave the marker UNSET for this hash: a failed
+                            # build must not be cached as loaded.
+                            return err, self._read_cost(ingest_hash), None
+                        self._write_disk_loaded_hash(ingest_hash)
+            # Loop back to the shared-lock fast path: between our exclusive
+            # release and the shared re-acquire another candidate may have
+            # swapped the graph again -- only a marker match under SH counts.
 
-                err = self._run_ingest(file_set, ingest_hash, graphdb)
-                if err is not None:
-                    # leave the loaded marker UNSET for this hash: a failed build
-                    # must not be cached as loaded.
-                    return err, self._read_cost(ingest_hash)
+    def _wipe_db(self):
+        """Wipe the shared single DB before loading a different hash (Community
+        cannot isolate candidates in separate databases). Data only -- the
+        uniqueness constraints and ``corpus_ft`` index are idempotent
+        (IF NOT EXISTS) and stay. -> None on success, else an error string
+        (treated exactly like an ingest failure)."""
+        try:
+            from langchain_neo4j import Neo4jGraph  # deferred dep + DB
+            cfg = self._cfg
+            graph = Neo4jGraph(
+                url=cfg.neo4j_url, username=cfg.neo4j_user,
+                password=cfg.neo4j_password, database=self._graphdb(),
+                refresh_schema=False)   # a bare delete needs no APOC/schema
+            try:
+                graph.query("MATCH (n) DETACH DELETE n")
+            finally:
+                try:
+                    graph._driver.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            return None
+        except Exception as e:  # noqa: BLE001
+            return f"db wipe failed: {type(e).__name__}: {e}"
 
-                self._loaded_hash = ingest_hash
-                self._write_disk_loaded_hash(ingest_hash)
-                return None, self._read_cost(ingest_hash)
-
-    def _run_ingest(self, file_set, ingest_hash, graphdb):
+    def _run_ingest(self, file_set, ingest_hash):
         """Materialize the ``extract.ts`` overlay into the graphmod tree, run
-        ``npx tsx ingest.ts <corpus> --db <graphdb> --hash <hash>`` (cwd=graphmod),
-        and restore the tree afterwards. -> None on success, else an error string
+        ``npx tsx ingest.ts <corpus> --hash <hash> [--llm]`` (cwd=graphmod; the
+        default single DB -- no ``--db``, Community cannot create others), and
+        restore the tree afterwards. -> None on success, else an error string
         (timeout / nonzero exit / tsx build error -- carries stderr for repair).
 
         The .ts overlay is written IN PLACE into ``graphmod_dir_abs`` (so
@@ -443,12 +508,14 @@ class IngestSearchRewardAdapter:
                 "NEO4J_USER": cfg.neo4j_user,
                 "NEO4J_PASS": cfg.neo4j_password,
                 # default DB on Community single-db; the marker keys the cache.
-                "NEO4J_DB": getattr(cfg, "neo4j_database", "neo4j") or "neo4j",
+                "NEO4J_DB": self._graphdb(),
             })
             # ingest.ts relpath under the graphmod cwd (CONTRACT CLI).
             ingest_ts = os.path.join("src", "ingestion", "ingest.ts")
             cmd = ["npx", "tsx", ingest_ts, cfg.corpus_dir_abs,
-                   "--db", graphdb, "--hash", ingest_hash]
+                   "--hash", ingest_hash]
+            if getattr(cfg, "ingest_llm_extraction", False):
+                cmd.append("--llm")             # M4 lever (folded into the hash)
             try:
                 proc = subprocess.run(
                     cmd, cwd=cfg.graphmod_dir_abs, env=env,
@@ -632,25 +699,30 @@ class IngestSearchRewardAdapter:
 # --------------------------------------------------------------------------- #
 class _FileLock:
     """A blocking advisory file lock so candidates in DIFFERENT processes
-    (``num_workers > 1``) serialize their ingest+swap against the shared single
-    Neo4j DB. POSIX ``fcntl.flock``; degrades to a no-op where unavailable (the
-    in-process ``_INGEST_LOCK`` still serializes within one process)."""
+    (``num_workers > 1``) coordinate against the shared single Neo4j DB:
+    EXCLUSIVE (default) around wipe+ingest+marker-write, SHARED
+    (``shared=True``) around the search phase -- concurrent same-hash searches
+    stay parallel while excluding a concurrent wipe. POSIX ``fcntl.flock``;
+    degrades to a no-op where unavailable (the in-process ``_INGEST_LOCK``
+    still serializes within one process)."""
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, shared: bool = False) -> None:
         self._path = path
+        self._shared = shared
         self._fd = None
 
-    def __enter__(self):
+    def acquire(self):
         try:
             import fcntl
             os.makedirs(os.path.dirname(self._path), exist_ok=True)
             self._fd = open(self._path, "w")
-            fcntl.flock(self._fd.fileno(), fcntl.LOCK_EX)
+            fcntl.flock(self._fd.fileno(),
+                        fcntl.LOCK_SH if self._shared else fcntl.LOCK_EX)
         except Exception:  # noqa: BLE001 - lock is best-effort cross-process
             self._fd = None
         return self
 
-    def __exit__(self, *exc):
+    def release(self):
         if self._fd is not None:
             try:
                 import fcntl
@@ -663,4 +735,10 @@ class _FileLock:
                 except OSError:
                     pass
                 self._fd = None
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *exc):
+        self.release()
         return False
