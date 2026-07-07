@@ -14,9 +14,10 @@ at `Demo 1/` — run15's subprocesses read from it.
   graphsearch's `langchain_neo4j.Neo4jGraph`.
 - Env vars (graphmod side): `NEO4J_URI` (`bolt://localhost:7687`), `NEO4J_USER`
   (`neo4j`), `NEO4J_PASS` (`password`), `NEO4J_DB` (`neo4j`). Per-candidate graph
-  isolation uses a distinct **database name** `graph_<ingest_hash>` (Neo4j 5
-  multi-db) OR a fresh DB wipe keyed by hash — adapter decides; default: pass
-  `NEO4J_DB=graph_<hash>`.
+  isolation: **fresh DB wipe keyed by ingest_hash** (disk marker file; wipe+ingest
+  under an exclusive file lock, searches under a shared lock). Neo4j Community is
+  single-DB, so the named-`graph_<hash>` variant is Enterprise-only future work;
+  `ingest.ts --db` support is kept but the adapter does not pass it.
 
 ## Canonical node ids (MERGE keys — re-ingest is idempotent)
 - `Person`    : `person:<slug(name|handle)>`        props `{id, name, info?}`

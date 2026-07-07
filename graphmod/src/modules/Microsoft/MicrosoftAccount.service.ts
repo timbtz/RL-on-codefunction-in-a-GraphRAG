@@ -1,6 +1,7 @@
 // ============================================================
 // MicrosoftAccount.service.ts — Domain service for the MicrosoftAccount module
 // ============================================================
+import * as crypto from "node:crypto"; // Node 18: no global WebCrypto — needed for crypto.randomUUID()
 //
 // Graph shape:
 //

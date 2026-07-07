@@ -4,11 +4,11 @@
     "Component",
     "Document",
     "Entity",
-    "Meeting",
     "Message",
     "Person",
-    "PullRequest",
-    "Ticket"
+    "Ticket",
+    "Meeting",
+    "PullRequest"
   ],
   "nodeProps": {
     "Person": {
@@ -38,7 +38,7 @@
     "Message": {
       "id": "string",
       "text": "string",
-      "ts": "datetime?",
+      "ts": "string?",
       "channel": "string?"
     },
     "Ticket": {
@@ -71,16 +71,6 @@
     },
     {
       "type": "ABOUT",
-      "from": "Meeting",
-      "to": "Component"
-    },
-    {
-      "type": "ABOUT",
-      "from": "PullRequest",
-      "to": "Component"
-    },
-    {
-      "type": "ABOUT",
       "from": "Ticket",
       "to": "Component"
     },
@@ -90,18 +80,8 @@
       "to": "Person"
     },
     {
-      "type": "ATTENDED",
-      "from": "Meeting",
-      "to": "Person"
-    },
-    {
       "type": "AUTHORED_BY",
       "from": "Document",
-      "to": "Person"
-    },
-    {
-      "type": "AUTHORED_BY",
-      "from": "PullRequest",
       "to": "Person"
     },
     {
@@ -110,33 +90,13 @@
       "to": "Ticket"
     },
     {
-      "type": "DISCUSSES",
-      "from": "Meeting",
-      "to": "Ticket"
-    },
-    {
-      "type": "FIXES",
-      "from": "PullRequest",
-      "to": "Ticket"
-    },
-    {
       "type": "HAS_CHUNK",
       "from": "Document",
       "to": "Chunk"
     },
     {
       "type": "HAS_CHUNK",
-      "from": "Meeting",
-      "to": "Chunk"
-    },
-    {
-      "type": "HAS_CHUNK",
       "from": "Message",
-      "to": "Chunk"
-    },
-    {
-      "type": "HAS_CHUNK",
-      "from": "PullRequest",
       "to": "Chunk"
     },
     {
@@ -147,7 +107,22 @@
     {
       "type": "MENTIONS",
       "from": "Chunk",
+      "to": "Component"
+    },
+    {
+      "type": "MENTIONS",
+      "from": "Chunk",
       "to": "Entity"
+    },
+    {
+      "type": "MENTIONS",
+      "from": "Chunk",
+      "to": "Person"
+    },
+    {
+      "type": "MENTIONS",
+      "from": "Chunk",
+      "to": "Ticket"
     },
     {
       "type": "REFERENCES",
@@ -156,17 +131,7 @@
     },
     {
       "type": "REFERENCES",
-      "from": "Meeting",
-      "to": "Document"
-    },
-    {
-      "type": "REFERENCES",
       "from": "Message",
-      "to": "Document"
-    },
-    {
-      "type": "REFERENCES",
-      "from": "PullRequest",
       "to": "Document"
     },
     {
@@ -185,13 +150,63 @@
       "to": "Person"
     },
     {
-      "type": "REVIEWED_BY",
+      "type": "SENT_BY",
+      "from": "Message",
+      "to": "Person"
+    },
+    {
+      "type": "ABOUT",
+      "from": "Meeting",
+      "to": "Component"
+    },
+    {
+      "type": "ABOUT",
+      "from": "PullRequest",
+      "to": "Component"
+    },
+    {
+      "type": "ATTENDED",
+      "from": "Meeting",
+      "to": "Person"
+    },
+    {
+      "type": "AUTHORED_BY",
       "from": "PullRequest",
       "to": "Person"
     },
     {
-      "type": "SENT_BY",
-      "from": "Message",
+      "type": "DISCUSSES",
+      "from": "Meeting",
+      "to": "Ticket"
+    },
+    {
+      "type": "FIXES",
+      "from": "PullRequest",
+      "to": "Ticket"
+    },
+    {
+      "type": "HAS_CHUNK",
+      "from": "Meeting",
+      "to": "Chunk"
+    },
+    {
+      "type": "HAS_CHUNK",
+      "from": "PullRequest",
+      "to": "Chunk"
+    },
+    {
+      "type": "REFERENCES",
+      "from": "Meeting",
+      "to": "Document"
+    },
+    {
+      "type": "REFERENCES",
+      "from": "PullRequest",
+      "to": "Document"
+    },
+    {
+      "type": "REVIEWED_BY",
+      "from": "PullRequest",
       "to": "Person"
     }
   ]

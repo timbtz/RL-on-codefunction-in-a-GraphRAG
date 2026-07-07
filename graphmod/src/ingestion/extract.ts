@@ -107,7 +107,8 @@ function clause(label: string, names: string[] | undefined): string {
  * Build the primary "card" chunk (index 0) for a record. The card NAMES every
  * related person/component/doc/ticket so traversal-gathered context lets the
  * answerer read the answer (usually a person name) directly out of the text.
- * Documents additionally split their body into further chunks (index 1..n).
+ * Documents (body) and Tickets (description) additionally split their prose
+ * into further chunks (index 1..n).
  */
 export function buildChunks(rec: RawRecord): ChunkSpec[] {
   const by = namesByRel(rec.refs);
@@ -163,8 +164,8 @@ export function buildChunks(rec: RawRecord): ChunkSpec[] {
 
   chunks.push({ id: chunkId(rec.id, 0), index: 0, content: card.trim(), source: rec.kind });
 
-  // Document + Meeting bodies split into further chunks (paragraphs / utterances).
-  if ((rec.label === "Document" || rec.label === "Meeting") && rec.body) {
+  // Any record body (document, meeting transcript, ticket description) splits into further chunks (paragraphs / utterances).
+  if (rec.body) {
     const paras = rec.body
       .split(/\r?\n\s*\r?\n/)
       .map((p) => p.replace(/\s+/g, " ").trim())
@@ -370,7 +371,14 @@ export async function extractWithLLM(
     if (known) {
       ent = { id: known.id, label: known.label, name: known.name };
     } else {
-      const type = e.type && allowedLabels.has(e.type) ? e.type : "Entity";
+      // Unknown Person/Component names downgrade to a generic Entity: they get
+      // entity:<slug> ids, so writing them under the gazetteer labels would
+      // break the person:/component: id scheme — and writeLlmExtraction would
+      // skip them entirely, silently losing their relations.
+      const type =
+        e.type && allowedLabels.has(e.type) && e.type !== "Person" && e.type !== "Component"
+          ? e.type
+          : "Entity";
       ent = { id: entityId(name), label: type, name };
     }
     idByName.set(name.toLowerCase(), ent);

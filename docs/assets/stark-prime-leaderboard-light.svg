@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="986" height="346" viewBox="0 0 986 346" role="img" aria-label="STARK-Prime test split: our evolved search vs leaderboard baselines on Recall at 20 and Hit at 1">
+<text x="196" y="30" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#24292f">Recall@20 (%)</text>
+<line x1="196.0" y1="46" x2="196.0" y2="316" stroke="#d8dee4" stroke-width="1"/>
+<text x="196.0" y="332" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#6e7781" text-anchor="middle">0</text>
+<line x1="306.0" y1="46" x2="306.0" y2="316" stroke="#d8dee4" stroke-width="1"/>
+<text x="306.0" y="332" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#6e7781" text-anchor="middle">20</text>
+<line x1="416.0" y1="46" x2="416.0" y2="316" stroke="#d8dee4" stroke-width="1"/>
+<text x="416.0" y="332" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#6e7781" text-anchor="middle">40</text>
+<line x1="526.0" y1="46" x2="526.0" y2="316" stroke="#d8dee4" stroke-width="1"/>
+<text x="526.0" y="332" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#6e7781" text-anchor="middle">60</text>
+<line x1="196" y1="46" x2="196" y2="316" stroke="#afb8c1" stroke-width="1"/>
+<path d="M 196 51.0 h 286.95 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -286.95 z" fill="#2a78d6"/>
+<text x="188" y="66.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#24292f" text-anchor="end">EvoRetrieve (evolved search)</text>
+<text x="492.9" y="66.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#24292f">52.9</text>
+<path d="M 196 81.0 h 228.26 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -228.26 z" fill="#c9c8c0"/>
+<text x="188" y="96.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#57606a" text-anchor="end">AvaTaR (GPT-4-turbo)</text>
+<text x="434.3" y="96.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">42.2</text>
+<path d="M 196 111.0 h 212.21 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -212.21 z" fill="#c9c8c0"/>
+<text x="188" y="126.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#57606a" text-anchor="end">AvaTaR (Claude-3-Opus)</text>
+<text x="418.2" y="126.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">39.3</text>
+<path d="M 196 141.0 h 211.00 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -211.00 z" fill="#c9c8c0"/>
+<text x="188" y="156.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#57606a" text-anchor="end">GritLM-7b</text>
+<text x="417.0" y="156.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">39.1</text>
+<path d="M 196 171.0 h 205.27 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -205.27 z" fill="#c9c8c0"/>
+<text x="188" y="186.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#57606a" text-anchor="end">multi-ada-002</text>
+<text x="411.3" y="186.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">38.0</text>
+<path d="M 196 201.0 h 204.06 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -204.06 z" fill="#c9c8c0"/>
+<text x="188" y="216.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#57606a" text-anchor="end">voyage-l2-instruct</text>
+<text x="410.1" y="216.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">37.8</text>
+<path d="M 196 231.0 h 194.00 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -194.00 z" fill="#c9c8c0"/>
+<text x="188" y="246.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#57606a" text-anchor="end">VSS (ada-002)</text>
+<text x="400.0" y="246.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">36.0</text>
+<path d="M 196 261.0 h 167.88 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -167.88 z" fill="#c9c8c0"/>
+<text x="188" y="276.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#57606a" text-anchor="end">BM25</text>
+<text x="373.9" y="276.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">31.2</text>
+<path d="M 196 291.0 h 133.72 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -133.72 z" fill="#c9c8c0"/>
+<text x="188" y="306.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#57606a" text-anchor="end">ColBERTv2</text>
+<text x="339.7" y="306.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">25.0</text>
+<text x="612" y="30" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#24292f">Hit@1 (%)</text>
+<line x1="612.0" y1="46" x2="612.0" y2="316" stroke="#d8dee4" stroke-width="1"/>
+<text x="612.0" y="332" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#6e7781" text-anchor="middle">0</text>
+<line x1="722.0" y1="46" x2="722.0" y2="316" stroke="#d8dee4" stroke-width="1"/>
+<text x="722.0" y="332" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#6e7781" text-anchor="middle">10</text>
+<line x1="832.0" y1="46" x2="832.0" y2="316" stroke="#d8dee4" stroke-width="1"/>
+<text x="832.0" y="332" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#6e7781" text-anchor="middle">20</text>
+<line x1="942.0" y1="46" x2="942.0" y2="316" stroke="#d8dee4" stroke-width="1"/>
+<text x="942.0" y="332" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#6e7781" text-anchor="middle">30</text>
+<line x1="612" y1="46" x2="612" y2="316" stroke="#afb8c1" stroke-width="1"/>
+<path d="M 612 51.0 h 306.20 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -306.20 z" fill="#2a78d6"/>
+<text x="928.2" y="66.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600" fill="#24292f">28.2</text>
+<path d="M 612 81.0 h 217.10 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -217.10 z" fill="#c9c8c0"/>
+<text x="839.1" y="96.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">20.1</text>
+<path d="M 612 111.0 h 198.84 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -198.84 z" fill="#c9c8c0"/>
+<text x="820.8" y="126.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">18.4</text>
+<path d="M 612 141.0 h 167.27 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -167.27 z" fill="#c9c8c0"/>
+<text x="789.3" y="156.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">15.6</text>
+<path d="M 612 171.0 h 162.10 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -162.10 z" fill="#c9c8c0"/>
+<text x="784.1" y="186.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">15.1</text>
+<path d="M 612 201.0 h 115.35 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -115.35 z" fill="#c9c8c0"/>
+<text x="737.4" y="216.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">10.8</text>
+<path d="M 612 231.0 h 134.93 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -134.93 z" fill="#c9c8c0"/>
+<text x="756.9" y="246.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">12.6</text>
+<path d="M 612 261.0 h 136.25 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -136.25 z" fill="#c9c8c0"/>
+<text x="758.2" y="276.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">12.8</text>
+<path d="M 612 291.0 h 125.25 a 4 4 0 0 1 4 4 v 12 a 4 4 0 0 1 -4 4 h -125.25 z" fill="#c9c8c0"/>
+<text x="747.2" y="306.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11.5" fill="#57606a">11.8</text>
+</svg>

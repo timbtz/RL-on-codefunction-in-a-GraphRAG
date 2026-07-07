@@ -7,8 +7,10 @@ import { DocModule } from "../Doc/doc.module";
 
 // Jira ticket source. The richest structured source: assignee/reporter -> Person,
 // component -> Component, blocks -> Ticket, and doc links -> Document all come
-// for free from fields. MENTIONS over the ticket description chunk picks up
-// gazetteer/regex entities.
+// for free from fields. The description becomes body chunks (index 1..n) behind
+// the card, and MENTIONS over the ticket description picks up gazetteer/regex
+// entities. This module declares the MENTIONS Chunk->Ticket triplet of the
+// per-module MENTIONS fan-out (see chunk.module.ts).
 export const TicketModule = defineModule({
     schema: {
         name: "TicketModule",
@@ -69,7 +71,7 @@ export const TicketModule = defineModule({
             },
             MENTIONS: {
                 from: "Chunk",
-                to: "Entity",
+                to: "Ticket",
                 cardinality: "0..n",
             },
         },

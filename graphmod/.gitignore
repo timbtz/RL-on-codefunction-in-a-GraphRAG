@@ -16,4 +16,5 @@ package-lock.json
 *.tar.gz
 *.tgz
 
-!.env.example
+!.env.example.ingest_cost/
+ingest_cost.json

@@ -400,9 +400,12 @@ class Campaign:
         (the offline smoke path)."""
         from graphsearch.reward import StubAnswerer  # boot_search put repo_root on path
         cfg = self.cfg
+        # .env spells it OPEN_ROUTER_API_KEY (see openai_client._api) -- accept both.
+        openrouter_key = (os.environ.get("OPENROUTER_API_KEY")
+                          or os.environ.get("OPEN_ROUTER_API_KEY"))
         has_key = bool(os.environ.get("OPENAI_API_KEY")
                        or os.environ.get("ANTHROPIC_API_KEY")
-                       or os.environ.get("OPENROUTER_API_KEY"))
+                       or openrouter_key)
         if cfg.fake_target and not has_key:
             return StubAnswerer()
         provider = cfg.answerer_provider.lower()
@@ -417,10 +420,10 @@ class Campaign:
             from langchain_openai import ChatOpenAI
             # Route through OpenRouter (OpenAI-compatible) when configured.
             extra = {}
-            if os.environ.get("OPENROUTER_API_KEY"):
+            if openrouter_key:
                 extra = {"base_url": os.environ.get("OPENROUTER_BASE_URL",
                                                     "https://openrouter.ai/api/v1"),
-                         "api_key": os.environ["OPENROUTER_API_KEY"],
+                         "api_key": openrouter_key,
                          # usage.include -> real USD cost in token_usage.cost,
                          # read by mcq_reward._answerer_cost
                          "extra_body": {"usage": {"include": True}}}

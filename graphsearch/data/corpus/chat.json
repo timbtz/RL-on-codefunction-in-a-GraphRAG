@@ -1,0 +1,139 @@
+[
+  { "seq": 1, "channel": "eng", "author": "tim", "ts": "2026-05-01T09:00:00Z",
+    "text": "I pushed the [[auth-redesign]] spec, please review. Tracked in PROJ-12." },
+
+  { "seq": 2, "channel": "eng", "author": "lasse", "ts": "2026-05-01T10:15:00Z", "reply_to": 1,
+    "text": "@tim the auth-redesign looks good - approving it." },
+
+  { "seq": 3, "channel": "eng", "author": "mara", "ts": "2026-05-02T11:00:00Z",
+    "text": "Billing migration is blocked on PROJ-42 until the usage events land." },
+
+  { "seq": 4, "channel": "eng", "author": "noah", "ts": "2026-05-02T11:30:00Z",
+    "text": "New hires should read [[billing-overview]] first." },
+
+  { "seq": 5, "channel": "eng", "author": "tim", "ts": "2026-05-03T09:45:00Z",
+    "text": "Token cache eviction is the risky bit of the auth-redesign." },
+
+  { "seq": 6, "channel": "eng", "author": "lasse", "ts": "2026-05-05T14:00:00Z",
+    "text": "Search index rebuild PROJ-7 depends on the new auth tokens." },
+
+  { "seq": 7, "channel": "eng", "author": "mara", "ts": "2026-05-15T08:30:00Z",
+    "text": "@noah nice work on the incident hotfix yesterday." },
+
+  { "seq": 8, "channel": "eng", "author": "noah", "ts": "2026-05-15T08:45:00Z", "reply_to": 7,
+    "text": "thanks - the eviction policy fix is in, PROJ-19 tracks the hardening." },
+
+  { "seq": 9, "channel": "eng", "author": "tim", "ts": "2026-05-16T10:00:00Z",
+    "text": "I'll own the long-term token cache eviction fix." },
+
+  { "seq": 10, "channel": "eng", "author": "lasse", "ts": "2026-05-18T13:00:00Z",
+    "text": "Can someone review the [[search-index-design]]?" },
+
+  { "seq": 11, "channel": "eng", "author": "mara", "ts": "2026-05-19T09:20:00Z", "reply_to": 10,
+    "text": "@lasse I reviewed the search-index-design, looks solid." },
+
+  { "seq": 12, "channel": "eng", "author": "noah", "ts": "2026-05-20T16:00:00Z",
+    "text": "Onboarding doc updated, see [[onboarding]]." },
+
+  { "seq": 50, "channel": "eng", "author": "priya", "ts": "2026-05-21T09:10:00Z",
+    "text": "Deploy pipeline overview is up, see [[deploy-pipeline]]. Canary stage is live behind a flag." },
+
+  { "seq": 51, "channel": "eng", "author": "jonas", "ts": "2026-05-21T15:40:00Z",
+    "text": "Reconciliation drift is way down after the batch fix, numbers are in [[billing-reconciliation]]." },
+
+  { "seq": 52, "channel": "eng", "author": "tim", "ts": "2026-05-22T10:05:00Z",
+    "text": "Proposal for rotating background job credentials is up: OPS-48. Every nightly job gets a short-lived token per run." },
+
+  { "seq": 53, "channel": "eng", "author": "lasse", "ts": "2026-05-22T10:30:00Z", "reply_to": 52,
+    "text": "@tim make sure the index refresh job is on the rotation list too." },
+
+  { "seq": 54, "channel": "eng", "author": "noah", "ts": "2026-05-25T11:00:00Z",
+    "text": "Rate limiter design draft posted, token bucket per tenant: [[rate-limiter-design]]. OPS-55 tracks the build." },
+
+  { "seq": 55, "channel": "eng", "author": "priya", "ts": "2026-05-25T13:20:00Z", "reply_to": 54,
+    "text": "@noah went through the rate-limiter draft, the idle-bucket eviction needs a hard cap or a tenant burst will thrash the cache." },
+
+  { "seq": 56, "channel": "eng", "author": "mara", "ts": "2026-05-27T09:00:00Z",
+    "text": "Digest emails move to the new notification service next sprint, see [[notifications-design]]." },
+
+  { "seq": 57, "channel": "eng", "author": "elif", "ts": "2026-05-28T08:15:00Z",
+    "text": "On-call runbook updated with the emergency patch checklist: [[oncall-runbook]]." },
+
+  { "seq": 58, "channel": "eng", "author": "jonas", "ts": "2026-06-01T10:45:00Z",
+    "text": "Any green light for the billing reconciliation cutover? BILL-61 is ready to go." },
+
+  { "seq": 59, "channel": "eng", "author": "mara", "ts": "2026-06-01T11:00:00Z", "reply_to": 58,
+    "text": "@jonas green light from me, ship the nightly reconciliation run." },
+
+  { "seq": 60, "channel": "eng", "author": "priya", "ts": "2026-06-02T14:30:00Z",
+    "text": "Feature flag cleanup OPS-75 done: fourteen stale flags removed from the deploy pipeline." },
+
+  { "seq": 61, "channel": "eng", "author": "noah", "ts": "2026-06-04T09:30:00Z",
+    "text": "Cache warming for the search index landed under SRCH-72, hit rate recovers within minutes of the re-index now." },
+
+  { "seq": 62, "channel": "eng", "author": "elif", "ts": "2026-06-10T08:00:00Z",
+    "text": "June outage writeup posted: [[incident-2026-06]]. Expired job credential, not the analyzer chain." },
+
+  { "seq": 63, "channel": "eng", "author": "lasse", "ts": "2026-06-10T08:20:00Z", "reply_to": 62,
+    "text": "@elif thanks - everything caught up by morning and the usual schedule is back to normal." },
+
+  { "seq": 64, "channel": "eng", "author": "tim", "ts": "2026-06-12T16:00:00Z",
+    "text": "LRU vs LFU numbers are in the tuning guide: [[token-cache-tuning]]. Leaning LRU with a bigger arena, PROJ-80 has the experiment." },
+
+  { "seq": 65, "channel": "eng", "author": "priya", "ts": "2026-06-12T16:25:00Z", "reply_to": 64,
+    "text": "@tim whatever the permanent overhaul is, it should ride the deploy pipeline canary, not a hand-rolled config push." },
+
+  { "seq": 66, "channel": "eng", "author": "jonas", "ts": "2026-06-15T09:40:00Z",
+    "text": "Metering glossary is up for anyone touching usage events: [[metrics-glossary]]." },
+
+  { "seq": 67, "channel": "eng", "author": "mara", "ts": "2026-06-16T10:10:00Z",
+    "text": "Reminder: every usage event must carry a tenant id AND a meter name, otherwise reconciliation flags phantom drift." },
+
+  { "seq": 68, "channel": "eng", "author": "noah", "ts": "2026-06-18T11:30:00Z",
+    "text": "Sign-off recorded for the rate limiter rollout, flags set to ten percent." },
+
+  { "seq": 69, "channel": "eng", "author": "lasse", "ts": "2026-06-19T15:00:00Z",
+    "text": "Analyzer chain notes posted with the synonym filter benchmarks: [[search-analyzer-notes]]. SRCH-64 tracks the upgrade." },
+
+  { "seq": 1, "channel": "ops", "author": "elif", "ts": "2026-05-06T09:00:00Z",
+    "text": "Paging test at 09:00, ignore the alert." },
+
+  { "seq": 2, "channel": "ops", "author": "priya", "ts": "2026-05-12T10:30:00Z",
+    "text": "Canary deploy for the rate limiter is rolling, watching the error budget." },
+
+  { "seq": 3, "channel": "ops", "author": "elif", "ts": "2026-05-14T10:05:00Z",
+    "text": "Sign-in errors spiking on the status page, checking the token dashboards." },
+
+  { "seq": 4, "channel": "ops", "author": "elif", "ts": "2026-05-14T10:20:00Z", "reply_to": 3,
+    "text": "Rolling back the last config push while we bisect. Emergency patch procedure is in the runbook if we need it." },
+
+  { "seq": 5, "channel": "ops", "author": "mara", "ts": "2026-05-23T09:15:00Z",
+    "text": "Invoices for tenant 4411 look double-charged again, reopening the March reconciliation checks." },
+
+  { "seq": 6, "channel": "ops", "author": "jonas", "ts": "2026-05-23T09:30:00Z", "reply_to": 5,
+    "text": "@mara the drift alarm fired before the nightly run, taking a look." },
+
+  { "seq": 7, "channel": "ops", "author": "priya", "ts": "2026-05-29T14:50:00Z",
+    "text": "Deploy pipeline froze mid-canary, rolling back. Not the auth tokens this time." },
+
+  { "seq": 8, "channel": "ops", "author": "elif", "ts": "2026-06-03T07:45:00Z",
+    "text": "Nightly jobs report: re-scan OK, reconciliation OK, digest send delayed twenty minutes." },
+
+  { "seq": 9, "channel": "ops", "author": "tim", "ts": "2026-06-05T08:30:00Z",
+    "text": "Rotated the background job credentials ahead of schedule, OPS-48 covers making that automatic." },
+
+  { "seq": 10, "channel": "ops", "author": "lasse", "ts": "2026-06-09T09:40:00Z",
+    "text": "Index refresh stalled again for eleven minutes, watching whether the credential rotation fixed it." },
+
+  { "seq": 11, "channel": "ops", "author": "elif", "ts": "2026-06-09T10:00:00Z", "reply_to": 10,
+    "text": "@lasse it recovered on its own, the credential looks fine now. Writeup coming." },
+
+  { "seq": 12, "channel": "ops", "author": "priya", "ts": "2026-06-11T13:00:00Z",
+    "text": "Flag cleanup deploy went out green across all stages." },
+
+  { "seq": 13, "channel": "ops", "author": "noah", "ts": "2026-06-14T10:20:00Z",
+    "text": "Idle-bucket eviction cap for the rate limiter is live in staging." },
+
+  { "seq": 14, "channel": "ops", "author": "mara", "ts": "2026-06-20T17:00:00Z",
+    "text": "Status page incident closed. Postmortem doc to follow tomorrow." }
+]

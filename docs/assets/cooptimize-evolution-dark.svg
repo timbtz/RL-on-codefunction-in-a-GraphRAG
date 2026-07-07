@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="990" height="356" viewBox="0 0 990 356" role="img" aria-label="Optimizer evolution: accepted candidate recall over steps across two chained campaigns, and seed versus co-optimized scores on the enterprise corpus">
+<rect x="388.5" y="46" width="263.5" height="250" fill="#161b22"/>
+<text x="52" y="22" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e6edf3">A · Accepted candidates over optimizer steps — recall@20 on rotating gate sets</text>
+<text x="52" y="37" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#8b949e">run14 (GLM mutator, 40 steps)  →  champion seeds run15 archipelago island (32 steps)</text>
+<line x1="52" y1="272.4" x2="652" y2="272.4" stroke="#30363d" stroke-width="1"/>
+<text x="45" y="275.9" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="end">0.2</text>
+<line x1="52" y1="225.2" x2="652" y2="225.2" stroke="#30363d" stroke-width="1"/>
+<text x="45" y="228.7" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="end">0.3</text>
+<line x1="52" y1="178.1" x2="652" y2="178.1" stroke="#30363d" stroke-width="1"/>
+<text x="45" y="181.6" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="end">0.4</text>
+<line x1="52" y1="130.9" x2="652" y2="130.9" stroke="#30363d" stroke-width="1"/>
+<text x="45" y="134.4" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="end">0.5</text>
+<line x1="52" y1="83.7" x2="652" y2="83.7" stroke="#30363d" stroke-width="1"/>
+<text x="45" y="87.2" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="end">0.6</text>
+<line x1="52" y1="46" x2="52" y2="296" stroke="#484f58" stroke-width="1"/>
+<line x1="52" y1="296" x2="652" y2="296" stroke="#484f58" stroke-width="1"/>
+<text x="52.0" y="311" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="middle">0</text>
+<text x="133.1" y="311" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="middle">10</text>
+<text x="214.2" y="311" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="middle">20</text>
+<text x="295.2" y="311" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="middle">30</text>
+<text x="376.3" y="311" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="middle">40</text>
+<text x="400.6" y="311" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="middle">0</text>
+<text x="481.7" y="311" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="middle">10</text>
+<text x="562.8" y="311" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="middle">20</text>
+<text x="627.7" y="311" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="middle">28</text>
+<text x="214.2" y="326" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#9198a1" text-anchor="middle">run14 step</text>
+<text x="514.2" y="326" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#9198a1" text-anchor="middle">run15 step</text>
+<line x1="311.5" y1="66.0" x2="400.6" y2="79.2" stroke="#8b949e" stroke-width="1" stroke-dasharray="3 3"/>
+<path d="M 52.0 149.9 L 68.2 149.9 L 68.2 102.7 L 84.4 102.7 L 84.4 81.8 L 311.5 81.8 L 311.5 66.0 L 368.2 66.0 L 368.2 66.0" fill="none" stroke="#3987e5" stroke-width="2" stroke-linejoin="round" opacity="0.85"/>
+<path d="M 400.6 79.2 L 579.0 79.2 L 579.0 76.5 L 627.7 76.5 L 627.7 76.5" fill="none" stroke="#199e70" stroke-width="2" stroke-linejoin="round" opacity="0.85"/>
+<rect x="48.0" y="145.9" width="8" height="8" transform="rotate(45 52.0 149.9)" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<rect x="396.6" y="98.7" width="8" height="8" transform="rotate(45 400.6 102.7)" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<text x="59.0" y="163.9" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#9198a1">seed 0.46</text>
+<text x="407.6" y="118.7" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#9198a1">seeded at 0.56</text>
+<circle cx="68.2" cy="102.7" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="76.3" cy="189.9" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="84.4" cy="81.8" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="92.5" cy="102.7" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="108.8" cy="170.9" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="125.0" cy="168.9" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="133.1" cy="81.8" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="141.2" cy="102.7" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="165.5" cy="128.9" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="173.6" cy="130.2" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="181.7" cy="240.3" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="214.2" cy="155.2" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="238.5" cy="170.9" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="246.6" cy="102.7" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="262.8" cy="97.5" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="303.4" cy="97.5" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="311.5" cy="66.0" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="319.6" cy="263.9" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="327.7" cy="156.5" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="335.8" cy="235.1" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="343.9" cy="128.3" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="352.0" cy="131.6" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="368.2" cy="89.6" r="4" fill="#3987e5" stroke="#0d1117" stroke-width="2"/>
+<circle cx="400.6" cy="79.2" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="408.8" cy="112.6" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="416.9" cy="146.0" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="425.0" cy="130.2" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="441.2" cy="187.2" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="465.5" cy="176.8" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="473.6" cy="97.5" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="481.7" cy="176.1" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="489.8" cy="157.7" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="497.9" cy="139.4" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="506.1" cy="97.5" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="514.2" cy="97.5" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="522.3" cy="139.4" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="530.4" cy="147.3" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="538.5" cy="128.9" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="546.6" cy="87.0" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="562.8" cy="113.2" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="570.9" cy="91.6" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="579.0" cy="76.5" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="603.4" cy="76.5" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="611.5" cy="97.5" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<circle cx="627.7" cy="113.2" r="4" fill="#199e70" stroke="#0d1117" stroke-width="2"/>
+<text x="311.5" y="57.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#e6edf3" text-anchor="middle">0.638</text>
+<text x="579.0" y="67.5" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" font-weight="600" fill="#e6edf3" text-anchor="middle">0.615</text>
+<circle cx="60" cy="280" r="4" fill="#3987e5"/><text x="69" y="283.5" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">run14 accepted</text>
+<circle cx="178" cy="280" r="4" fill="#199e70"/><text x="187" y="283.5" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">run15 accepted (island b0_r0)</text>
+<text x="726" y="22" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13" font-weight="600" fill="#e6edf3">B · Ingestion + search co-optimized</text>
+<text x="726" y="37" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#8b949e">5-source enterprise corpus, 81-MCQ exam</text>
+<line x1="726" y1="233.5" x2="946" y2="233.5" stroke="#30363d" stroke-width="1"/>
+<text x="719" y="237.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="end">0.25</text>
+<line x1="726" y1="171.0" x2="946" y2="171.0" stroke="#30363d" stroke-width="1"/>
+<text x="719" y="174.5" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="end">0.5</text>
+<line x1="726" y1="108.5" x2="946" y2="108.5" stroke="#30363d" stroke-width="1"/>
+<text x="719" y="112.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="end">0.75</text>
+<line x1="726" y1="46.0" x2="946" y2="46.0" stroke="#30363d" stroke-width="1"/>
+<text x="719" y="49.5" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10.5" fill="#8b949e" text-anchor="end">1</text>
+<line x1="726" y1="296" x2="946" y2="296" stroke="#484f58" stroke-width="1"/>
+<path d="M 743.0 108.2 a 4 4 0 0 1 4 -4 h 26 a 4 4 0 0 1 4 4 v 187.8 h -34 z" fill="#484f58"/>
+<text x="760.0" y="99.2" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1" text-anchor="middle">0.77</text>
+<path d="M 785.0 58.3 a 4 4 0 0 1 4 -4 h 26 a 4 4 0 0 1 4 4 v 237.8 h -34 z" fill="#3987e5"/>
+<text x="802.0" y="68.2" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="600" fill="#0d1117" text-anchor="middle">0.97</text>
+<text x="781.0" y="311" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1" text-anchor="middle">MCQ accuracy</text>
+<path d="M 853.0 116.8 a 4 4 0 0 1 4 -4 h 26 a 4 4 0 0 1 4 4 v 179.2 h -34 z" fill="#484f58"/>
+<text x="870.0" y="107.8" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1" text-anchor="middle">0.73</text>
+<path d="M 895.0 50.0 a 4 4 0 0 1 4 -4 h 26 a 4 4 0 0 1 4 4 v 246.0 h -34 z" fill="#3987e5"/>
+<text x="912.0" y="60.0" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" font-weight="600" fill="#0d1117" text-anchor="middle">1.00</text>
+<text x="891.0" y="311" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1" text-anchor="middle">retrieval-hit</text>
+<rect x="726" y="320" width="10" height="10" fill="#484f58" rx="2"/><text x="741" y="329" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">hand-written seed</text>
+<rect x="850" y="320" width="10" height="10" fill="#3987e5" rx="2"/><text x="865" y="329" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="11" fill="#9198a1">co-optimized</text>
+</svg>

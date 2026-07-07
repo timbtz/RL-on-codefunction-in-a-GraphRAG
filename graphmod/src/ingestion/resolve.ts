@@ -89,7 +89,7 @@ export interface RawRecord {
   refs: RawRef[];
   /** prose scanned for regex/gazetteer MENTIONS (and the card body for docs) */
   text: string;
-  /** doc body split into chunks 1..n; undefined for chat/jira (single card) */
+  /** doc body / ticket description split into chunks 1..n; undefined for chat (single card) */
   body?: string;
 }
 
@@ -162,7 +162,7 @@ export interface ComponentVocab {
   name: string;
 }
 
-/** Known people in the corpus. */
+/** Known people in the corpus (base set + docs/meetings corpus + calibration additions). */
 export const KNOWN_PEOPLE: PersonVocab[] = [
   { handle: "tim", name: "Tim" },
   { handle: "lasse", name: "Lasse" },
@@ -172,9 +172,11 @@ export const KNOWN_PEOPLE: PersonVocab[] = [
   { handle: "omar", name: "Omar" },
   { handle: "sara", name: "Sara" },
   { handle: "jack", name: "Jack" },
+  { handle: "jonas", name: "Jonas" },
+  { handle: "elif", name: "Elif" },
 ];
 
-/** Known components / projects. */
+/** Known components (base set + docs/meetings corpus + calibration additions). */
 export const KNOWN_COMPONENTS: ComponentVocab[] = [
   { slug: "auth-redesign", name: "auth-redesign" },
   { slug: "billing", name: "billing" },
@@ -182,6 +184,9 @@ export const KNOWN_COMPONENTS: ComponentVocab[] = [
   { slug: "onboarding", name: "onboarding" },
   { slug: "infra", name: "infra" },
   { slug: "data-platform", name: "data-platform" },
+  { slug: "deploy-pipeline", name: "deploy-pipeline" },
+  { slug: "rate-limiter", name: "rate-limiter" },
+  { slug: "notifications", name: "notifications" },
 ];
 
 // ---- Gazetteer + resolver ----

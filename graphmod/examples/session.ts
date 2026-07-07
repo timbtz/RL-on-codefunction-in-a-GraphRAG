@@ -12,9 +12,15 @@ export async function getSession(): Promise<GraphSession> {
       process.env.NEO4J_PASS ?? "password",
     ),
   );
-  return neo4jDriver.session({
+  const session = neo4jDriver.session({
     database: process.env.NEO4J_DB ?? "neo4j",
   });
-
-
+  // Close the DRIVER (its connection pool keeps the node event loop alive)
+  // when the session is closed, so CLI scripts like ingest.ts actually exit.
+  const closeSession = session.close.bind(session);
+  (session as { close: () => Promise<void> }).close = async () => {
+    await closeSession();
+    await neo4jDriver.close();
+  };
+  return session;
 }

@@ -1,0 +1,86 @@
+[
+  { "key": "PROJ-12", "title": "Migrate auth to OAuth 2.1",
+    "description": "Replace session cookies with OAuth 2.1 access + refresh tokens. See the auth-redesign spec for the token cache details.",
+    "status": "In Progress", "assignee": "tim", "reporter": "lasse",
+    "components": ["auth-redesign"], "references": ["auth-redesign"], "blocks": [] },
+
+  { "key": "PROJ-42", "title": "Stream billing usage events",
+    "description": "Move billing from the monthly batch job to streaming usage events aggregated per period.",
+    "status": "In Progress", "assignee": "mara", "reporter": "noah",
+    "components": ["billing"], "references": ["billing-overview"], "blocks": [] },
+
+  { "key": "PROJ-7", "title": "Rebuild search index",
+    "description": "Rebuild the full-text search index with the new analyzer chain and incremental refresh.",
+    "status": "Open", "assignee": "lasse", "reporter": "tim",
+    "components": ["search-index"], "references": ["search-index-design"], "blocks": [] },
+
+  { "key": "PROJ-19", "title": "Auth incident hardening",
+    "description": "Harden the token cache eviction policy after the May auth incident.",
+    "status": "Open", "assignee": "tim", "reporter": "mara",
+    "components": ["auth-redesign"], "references": ["incident-2026-05"], "blocks": ["PROJ-7"] },
+
+  { "key": "PROJ-33", "title": "Refresh onboarding docs",
+    "description": "Update the engineering onboarding guide for the new billing flow.",
+    "status": "Done", "assignee": "noah", "reporter": "lasse",
+    "components": [], "references": ["onboarding"], "blocks": [] },
+
+  { "key": "OPS-48", "title": "Rotate background job credentials",
+    "description": "Automatic rotation of credentials for every nightly background job (index re-scan, reconciliation, digest send). Each run fetches a fresh short-lived access token per the service-to-service auth guide.",
+    "status": "In Progress", "assignee": "elif", "reporter": "tim",
+    "components": [], "references": ["incident-2026-06", "api-auth-guide"], "blocks": [] },
+
+  { "key": "OPS-51", "title": "Harden deploy pipeline canary stage",
+    "description": "Tighten the canary error-budget gate and make rollback automatic on a red canary.",
+    "status": "In Progress", "assignee": "priya", "reporter": "noah",
+    "components": ["deploy-pipeline"], "references": ["deploy-pipeline"], "blocks": [] },
+
+  { "key": "OPS-55", "title": "Per-tenant rate limiter",
+    "description": "Build the token bucket rate limiter with an in-memory bucket cache and an idle-bucket eviction cap.",
+    "status": "In Progress", "assignee": "noah", "reporter": "priya",
+    "components": ["rate-limiter"], "references": ["rate-limiter-design"], "blocks": [] },
+
+  { "key": "OPS-58", "title": "On-call onboarding module",
+    "description": "Add an on-call module to engineering onboarding covering paging, escalation, and the emergency patch procedure.",
+    "status": "Open", "assignee": "elif", "reporter": "noah",
+    "components": [], "references": ["oncall-runbook"], "blocks": [] },
+
+  { "key": "BILL-61", "title": "Billing reconciliation nightly run",
+    "description": "Nightly reconciliation comparing streamed usage events against issued invoices, flagging drift per tenant and meter.",
+    "status": "In Progress", "assignee": "jonas", "reporter": "elif",
+    "components": ["billing"], "references": ["billing-reconciliation"], "blocks": [] },
+
+  { "key": "SRCH-64", "title": "Upgrade analyzer chain",
+    "description": "Ship the synonym-filter analyzer chain from the notes; no stemming, exact-term behavior preserved for ticket keys.",
+    "status": "Open", "assignee": "lasse", "reporter": "priya",
+    "components": ["search-index"], "references": ["search-analyzer-notes"], "blocks": [] },
+
+  { "key": "BILL-66", "title": "Metrics glossary refresh",
+    "description": "Keep the usage metering glossary current; document the double-write rule for renamed meters.",
+    "status": "Done", "assignee": "jonas", "reporter": "noah",
+    "components": ["billing"], "references": ["metrics-glossary"], "blocks": [] },
+
+  { "key": "BILL-70", "title": "Notification digest batching",
+    "description": "Batch digest emails per tenant per period and move the send into the nightly window.",
+    "status": "In Progress", "assignee": "mara", "reporter": "jonas",
+    "components": ["notifications"], "references": ["notifications-design"], "blocks": [] },
+
+  { "key": "SRCH-72", "title": "Search index cache warming",
+    "description": "Warm the query cache right after the nightly re-index so the hit rate recovers within minutes instead of hours.",
+    "status": "Done", "assignee": "noah", "reporter": "lasse",
+    "components": ["search-index"], "references": [], "blocks": [] },
+
+  { "key": "OPS-75", "title": "Stale feature flag cleanup",
+    "description": "Remove flags older than ninety days from the deploy pipeline per the feature flag playbook.",
+    "status": "Done", "assignee": "priya", "reporter": "tim",
+    "components": ["deploy-pipeline"], "references": ["feature-flags"], "blocks": [] },
+
+  { "key": "WEB-77", "title": "Login page copy refresh",
+    "description": "Update the sign-in page copy and error messages as part of the May incident follow-up.",
+    "status": "Open", "assignee": "priya", "reporter": "noah",
+    "components": [], "references": [], "blocks": [] },
+
+  { "key": "PROJ-80", "title": "Token cache LRU experiment",
+    "description": "Run the LRU vs LFU eviction experiment from the tuning guide on the staging arena and pick the permanent policy.",
+    "status": "Open", "assignee": "tim", "reporter": "noah",
+    "components": [], "references": ["token-cache-tuning"], "blocks": [] }
+]
